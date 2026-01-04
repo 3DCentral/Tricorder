@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Python Games
+Comment=Examples of games written in Python
+TryExec=/usr/share/python_games/launcher.sh
+Exec=sh -c /usr/share/python_games/launcher.sh
+Icon=python
+Terminal=false
+Type=Application
+Categories=Application;Game;
+StartupNotify=true
