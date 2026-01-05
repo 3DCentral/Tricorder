@@ -158,7 +158,7 @@ class ScreenMain(LcarsScreen):
                 poll_result = self.emf.scan_process.poll()
                 if poll_result is not None:
                     # Process has finished
-                    print(f"Scan process completed with code: {poll_result}")
+                    print("Scan process completed with code: {}".format(poll_result))
                     self.emf.scanning = False
                     self.emf_gadget.emf_scanning = False
                     # Load the final spectrum image
@@ -192,7 +192,7 @@ class ScreenMain(LcarsScreen):
                                 self.emf.spectrum_image = new_image
                                 self.emf_gadget.image = new_image
                                 self.emf.last_spectrum_file = latest_file
-                                print(f"Loaded spectrum update: {latest_file}")
+                                print("Loaded spectrum update: {}".format(latest_file))
                         else:
                             # Fallback to main spectrum.png if no progress files exist yet
                             if os.path.exists("/home/tricorder/rpi_lcars-master/spectrum.png"):
@@ -201,7 +201,7 @@ class ScreenMain(LcarsScreen):
                                 
                     except (pygame.error, IOError, OSError) as e:
                         # File is still being written or other IO issue, skip this frame
-                        print(f"Could not load spectrum image: {e}")
+                        print("Could not load spectrum image: {}".format(e))
                         pass
                 
                 # Draw scanning animation overlay
@@ -215,6 +215,7 @@ class ScreenMain(LcarsScreen):
                 self.last_waterfall_check = current_time
                 try:
                     # Load waterfall data files
+                    import numpy as np
                     waterfall_data = np.load("/home/tricorder/rpi_lcars-master/spectrum_live_waterfall.npy")
                     psd_data = np.load("/home/tricorder/rpi_lcars-master/spectrum_live_psd.npy")
                     frequencies = np.load("/home/tricorder/rpi_lcars-master/spectrum_live_frequencies.npy")
@@ -284,26 +285,18 @@ class ScreenMain(LcarsScreen):
             if self.micro.scanning == False:
                 self.micro.cam.start()
             self.micro.scanning = True
-            #self.microscope_gadget_ref.visible = True
-            #self.microscope_gadget.visible = False
         if self.spectral_gadget.visible:
             if self.spectro.scanning == False:
                 self.spectro.cam.start()
             self.spectro.analyzing = False
             self.spectro.scanning = True
-            #self.spectro.image = 
         if self.emf_gadget.visible:
-            # TO DO set scanning to true and move this to widgets class .update
             self.emf.scanning = True            
             self.emf_gadget.emf_scanning = True
             
             # Reset the last spectrum file tracking so we start fresh
             if hasattr(self.emf, 'last_spectrum_file'):
                 delattr(self.emf, 'last_spectrum_file')
-
-            # TO DO:  check if pid is still going, otherwise set scanning to false. only initiate scan if previous is done
-            # also check what range is selected
-            #os.system("python /home/tricorder/rpi_lcars-master/rtl_test.py")
             
             # Use subprocess.Popen to get actual process handle
             self.emf.scan_process = subprocess.Popen(
@@ -337,11 +330,9 @@ class ScreenMain(LcarsScreen):
             else:
                 print("try to listen in to: ", self.emf_gadget.target_frequency)
                 print("'rtl_fm -f ",str(self.emf_gadget.target_frequency),"e6 -M wbfm -s 200000 -r 48000 - | play -t raw -r 48k -es -b 16 -c 1 -V1 - ")
-                #self.fm_pid = os.system("rtl_fm -f 99.9e6 -M wbfm -s 200000 -r 48000 - | play -t raw -r 48k -es -b 16 -c 1 -V1 - &")
                 process = subprocess.Popen(['bash', '-c', 'rtl_fm -f ' + str(self.emf_gadget.target_frequency) + 'e6 -M wbfm -s 200000 -r 48000 - | play -t raw -r 48k -es -b 16 -c 1 -V1 - &'], 
                              preexec_fn=os.setsid) 
                 self.fm_pid = process.pid
-                #os.killpg(os.getpgid(self.fm_pid), signal.SIGTERM)
                 self.tuned_in = True        
         
             
@@ -358,15 +349,13 @@ class ScreenMain(LcarsScreen):
             sorted_files = sorted( files, key = lambda file: os.path.getmtime(file), reverse=True)
             if self.micro.reviewing >= len(files):
                 self.micro.reviewing = 0
-            #self.microscope_gadget.image = pygame.image.load(files[self.micro.reviewing])
-            #self.microscope_gadget.image.blit(pygame.image.load(files[self.micro.reviewing]),(854,289))
             review_surf = pygame.Surface((640,480))
             review_surf.blit(pygame.image.load(sorted_files[self.micro.reviewing]),(-299,-187))
             print("file time:" + str(os.path.getmtime(sorted_files[self.micro.reviewing])))
             self.microscope_gadget.image = review_surf
             self.micro.reviewing+=1
-        # Handle EMF gadget - Start live scanning mode
-        if self.emf_gadget.visible:
+        # Handle EMF gadget - Toggle live scanning mode
+        if self.emf_gadget.visible or self.waterfall_display.visible:
             if not self.live_scan_active:
                 # Start live scan
                 print("Starting live scan at 99.5 MHz...")
@@ -377,23 +366,19 @@ class ScreenMain(LcarsScreen):
                 )
                 self.live_scan_active = True
                 
-                # Show waterfall display
+                # Show waterfall display, hide EMF static
                 self.emf_gadget.visible = False
                 self.waterfall_display.visible = True
             else:
-                # Stop live scan
+                # Stop live scan but keep waterfall visible (frozen)
                 print("Stopping live scan...")
                 if self.live_scan_process:
                     self.live_scan_process.terminate()
                     self.live_scan_process.wait()
                     self.live_scan_process = None
                 self.live_scan_active = False
-                
-                # Show EMF gadget again
-                self.waterfall_display.visible = False
-                self.emf_gadget.visible = True
+                print("Live scan stopped - waterfall frozen")
             
-
        
     # TO DO: break this out into functions     
     def navHandlerUp(self, item, event, clock):
@@ -408,8 +393,6 @@ class ScreenMain(LcarsScreen):
             files = [f for f in glob.glob("/home/tricorder/rpi_lcars-master/app/screenshots/microscope_*.jpg")]
             sorted_files = sorted( files, key = lambda file: os.path.getmtime(file), reverse=True)
             self.micro.reviewing = 0
-            #self.microscope_gadget.image = pygame.image.load(files[self.micro.reviewing])
-            #self.microscope_gadget.image.blit(pygame.image.load(files[self.micro.reviewing]),(854,289))
             review_surf = pygame.Surface((640,480))
             review_surf.blit(pygame.image.load(sorted_files[self.micro.reviewing]),(-299,-187))
             print("file time:" + str(os.path.getmtime(sorted_files[self.micro.reviewing])))
@@ -427,8 +410,6 @@ class ScreenMain(LcarsScreen):
             files = [f for f in glob.glob("/home/tricorder/rpi_lcars-master/app/screenshots/microscope_*.jpg")]
             sorted_files = sorted( files, key = lambda file: os.path.getmtime(file), reverse=True)
             self.micro.reviewing = len(files)-1
-            #self.microscope_gadget.image = pygame.image.load(files[self.micro.reviewing])
-            #self.microscope_gadget.image.blit(pygame.image.load(files[self.micro.reviewing]),(854,289))
             review_surf = pygame.Surface((640,480))
             review_surf.blit(pygame.image.load(sorted_files[self.micro.reviewing]),(-299,-187))
             print("file time:" + str(os.path.getmtime(sorted_files[self.micro.reviewing])))
@@ -447,8 +428,6 @@ class ScreenMain(LcarsScreen):
             sorted_files = sorted( files, key = lambda file: os.path.getmtime(file), reverse=True)
             if self.micro.reviewing >= len(files):
                 self.micro.reviewing = 0
-            #self.microscope_gadget.image = pygame.image.load(files[self.micro.reviewing])
-            #self.microscope_gadget.image.blit(pygame.image.load(files[self.micro.reviewing]),(854,289))
             review_surf = pygame.Surface((640,480))
             review_surf.blit(pygame.image.load(sorted_files[self.micro.reviewing]),(-299,-187))
             print("file time:" + str(os.path.getmtime(sorted_files[self.micro.reviewing])))
@@ -471,8 +450,6 @@ class ScreenMain(LcarsScreen):
             sorted_files = sorted( files, key = lambda file: os.path.getmtime(file), reverse=True)
             if self.micro.reviewing >= len(files):
                 self.micro.reviewing = 0
-            #self.microscope_gadget.image = pygame.image.load(files[self.micro.reviewing])
-            #self.microscope_gadget.image.blit(pygame.image.load(files[self.micro.reviewing]),(854,289))
             review_surf = pygame.Surface((640,480))
             review_surf.blit(pygame.image.load(sorted_files[self.micro.reviewing]),(-299,-187))
             print("file time:" + str(os.path.getmtime(sorted_files[self.micro.reviewing])))
@@ -490,12 +467,21 @@ class ScreenMain(LcarsScreen):
         if self.spectro.scanning:
             self.spectro.cam.stop()
         self.spectro.scanning = False
+        
+        # Stop live scan if active
+        if self.live_scan_active:
+            if self.live_scan_process:
+                self.live_scan_process.terminate()
+                self.live_scan_process.wait()
+                self.live_scan_process = None
+            self.live_scan_active = False
             
         self.micro.scanning = False
         self.emf_gadget.visible = False
         self.emf_gadget.emf_scanning = False
         self.microscope_gadget.visible = False
         self.spectral_gadget.visible = False
+        self.waterfall_display.visible = False
         self.dashboard.visible = True
         self.weather.visible = False
         self.microscope_gadget_ref.visible = False
@@ -506,6 +492,14 @@ class ScreenMain(LcarsScreen):
         if self.spectro.scanning == True:
             self.spectro.cam.stop()
         self.spectro.scanning = False
+        
+        # Stop live scan if active
+        if self.live_scan_active:
+            if self.live_scan_process:
+                self.live_scan_process.terminate()
+                self.live_scan_process.wait()
+                self.live_scan_process = None
+            self.live_scan_active = False
             
         if self.micro.scanning == False:
             self.micro.cam.start()
@@ -514,6 +508,7 @@ class ScreenMain(LcarsScreen):
         self.hideInfoText()
         self.emf_gadget.visible = False
         self.emf_gadget.emf_scanning = False
+        self.waterfall_display.visible = False
         self.microscope_gadget.visible = True
         self.dashboard.visible = False
         self.spectral_gadget.visible = False
@@ -529,8 +524,18 @@ class ScreenMain(LcarsScreen):
             self.spectro.cam.stop()
         self.spectro.scanning = False
         self.micro.scanning = False
+        
+        # Stop live scan if active
+        if self.live_scan_active:
+            if self.live_scan_process:
+                self.live_scan_process.terminate()
+                self.live_scan_process.wait()
+                self.live_scan_process = None
+            self.live_scan_active = False
+            
         self.emf_gadget.visible = False
         self.emf_gadget.emf_scanning = False
+        self.waterfall_display.visible = False
         self.spectral_gadget.visible = False
         self.microscope_gadget.visible = False
         self.dashboard.visible = False
@@ -563,7 +568,17 @@ class ScreenMain(LcarsScreen):
             self.spectro.cam.stop()
         self.spectro.scanning = False
         self.micro.scanning = False
+        
+        # Stop live scan if active and switch back to static EMF view
+        if self.live_scan_active:
+            if self.live_scan_process:
+                self.live_scan_process.terminate()
+                self.live_scan_process.wait()
+                self.live_scan_process = None
+            self.live_scan_active = False
+            
         self.emf_gadget.visible = True
+        self.waterfall_display.visible = False
         self.spectral_gadget.visible = False
         self.microscope_gadget.visible = False
         self.dashboard.visible = False
@@ -576,6 +591,15 @@ class ScreenMain(LcarsScreen):
         if self.micro.scanning:
             self.micro.cam.stop()
         self.micro.scanning = False
+        
+        # Stop live scan if active
+        if self.live_scan_active:
+            if self.live_scan_process:
+                self.live_scan_process.terminate()
+                self.live_scan_process.wait()
+                self.live_scan_process = None
+            self.live_scan_active = False
+            
         if self.spectro.scanning == False and self.spectro.analyzing == False:
             self.spectro.cam.start()
         self.spectro.scanning = True
@@ -583,6 +607,7 @@ class ScreenMain(LcarsScreen):
         self.spectral_gadget.visible = True
         self.emf_gadget.visible = False
         self.emf_gadget.emf_scanning = False
+        self.waterfall_display.visible = False
         self.microscope_gadget.visible = False
         self.dashboard.visible = False
         self.weather.visible = False
