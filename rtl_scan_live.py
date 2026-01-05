@@ -27,7 +27,7 @@ from rtlsdr import RtlSdr
 DEFAULT_SAMPLE_RATE = 2.4e6  # 2.4 MHz bandwidth
 DEFAULT_WATERFALL_LINES = 150  # 5 seconds at 30 updates/sec
 FFT_SIZE = 1024
-UPDATE_INTERVAL = 0.033  # ~30 Hz update rate (33ms between updates)
+UPDATE_INTERVAL = 0.0165  # ~60 Hz update rate (16.5ms between updates) - doubled from 30 Hz
 GAIN = 4  # Can adjust based on signal strength needs
 FREQ_CORRECTION = 60  # PPM correction
 
@@ -151,9 +151,10 @@ def main():
                 # Save current PSD
                 save_data_atomic(psd, PSD_FILE_TEMP, PSD_FILE)
                 
-                # Save waterfall as 2D array (newest line at index 0)
+                # Save waterfall as 2D array (flip so newest line is at bottom for downward scroll)
                 waterfall_array = np.array(waterfall_buffer)
-                save_data_atomic(waterfall_array, WATERFALL_FILE_TEMP, WATERFALL_FILE)
+                waterfall_flipped = np.flipud(waterfall_array)  # Flip vertically
+                save_data_atomic(waterfall_flipped, WATERFALL_FILE_TEMP, WATERFALL_FILE)
                 
                 last_update = current_time
                 frame_count += 1
