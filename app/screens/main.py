@@ -1,5 +1,4 @@
 from datetime import datetime
-
 from ui.widgets.background import LcarsBackgroundImage, LcarsImage
 from ui.widgets.gifimage import LcarsGifImage
 from ui.widgets.lcars_widgets import *
@@ -11,43 +10,20 @@ import signal
 import os
 import glob
 
-
-from datasources.network import get_ip_address_string
-
-
 class ScreenMain(LcarsScreen):
     def setup(self, all_sprites):
         all_sprites.add(LcarsBackgroundImage("assets/lcars_screen_i5.png"),
                         layer=0)
-
         # panel text
         all_sprites.add(LcarsText(colours.BLACK, (15, 44), "LCARS 105"),
                         layer=1)
                         
-        #all_sprites.add(LcarsText(colours.ORANGE, (0, 48), "TRICORDER", 2),
-        #                layer=1)
         all_sprites.add(LcarsBlockMedium(colours.RED_BROWN, (186, 5), "SCAN", self.scanHandler),
                         layer=1)
         all_sprites.add(LcarsBlockSmall(colours.ORANGE, (357, 5), "RECORD", self.recordHandler),
                         layer=1)
         all_sprites.add(LcarsBlockLarge(colours.BEIGE, (463, 5), "ANALYZE", self.analyzeHandler),
                         layer=1)
-
-        self.ip_address = LcarsText(colours.BLACK, (444, 520),
-                                    get_ip_address_string())
-        all_sprites.add(self.ip_address, layer=1)
-
-        # info text
-        all_sprites.add(LcarsText(colours.WHITE, (192, 223), "EVENT LOG:", 1.5),
-                        layer=3)
-        all_sprites.add(LcarsText(colours.BLUE, (244, 223), "2 ALARM ZONES TRIGGERED", 1.5),
-                        layer=3)
-        all_sprites.add(LcarsText(colours.BLUE, (286, 223), "14.3 kWh USED YESTERDAY", 1.5),
-                        layer=3)
-        all_sprites.add(LcarsText(colours.BLUE, (330, 223), "1.3 Tb DATA USED THIS MONTH", 1.5),
-                        layer=3)
-        self.info_text = all_sprites.get_sprites_from_layer(3)
-        self.hideInfoText()
 
         # date display
         self.stardate = LcarsText(colours.BLUE, (12, 888), "STAR DATE", 1.5)
@@ -117,20 +93,17 @@ class ScreenMain(LcarsScreen):
         self.waterfall_display.visible = False
         all_sprites.add(self.waterfall_display, layer=2)
 
-
         #all_sprites.add(LcarsMoveToMouse(colours.WHITE), layer=1)
         self.beep1 = Sound("assets/audio/panel/201.wav")
         Sound("assets/audio/panel/220.wav").play()
         
         self.tuned_in = False
-        
         # Initialize spectrum checking throttle
         self.last_spectrum_check = 0
         
         # Scanning animation state
         self.scan_animation_frame = 0
         self.last_animation_update = 0
-
 
         # Live scan state
         self.live_scan_process = None
@@ -139,7 +112,6 @@ class ScreenMain(LcarsScreen):
 
     def update(self, screenSurface, fpsClock):
         if pygame.time.get_ticks() - self.lastClockUpdate > 1000:
-            #self.stardate.setText("STAR DATE {}".format(datetime.now().strftime("%d%m.%y %H:%M:%S")))
             hour_formatted = int(int(format(datetime.now().strftime("%H"))) / 24 * 10)
             self.stardate.setText("STAR DATE {}".format(datetime.now().strftime("%y%m%d.")) + str(hour_formatted))
             self.lastClockUpdate = pygame.time.get_ticks()
@@ -231,20 +203,12 @@ class ScreenMain(LcarsScreen):
     
     def _draw_scanning_animation(self, screen):
         """Draw a scanning animation indicator above the EMF display"""
-        # Animation dots that cycle
         dots = [".", "..", "...", "....", ".....", "......", ".......", "........", "........."]
         scan_text = "....." + dots[self.scan_animation_frame]
-        
-        # Position above the EMF gadget display area (adjust these coordinates as needed)
-        x_pos = 187 + 450  # Center above the display
-        y_pos = 299 - 140   # Above the display
-        
-        # Create font and render text
         font = pygame.font.Font("assets/swiss911.ttf", 20)
-        text_surface = font.render(scan_text, True, (255, 255, 0))  # yellow color
-        text_rect = text_surface.get_rect(center=(x_pos, y_pos))
+        text_surface = font.render(scan_text, True, (255, 255, 0))
+        text_rect = text_surface.get_rect(center=(637, 159))
         
-        # Draw semi-transparent background box
         padding = 10
         bg_rect = pygame.Rect(
             text_rect.x - padding,
@@ -256,49 +220,108 @@ class ScreenMain(LcarsScreen):
         bg_surface.set_alpha(180)
         bg_surface.fill((0, 0, 0))
         screen.blit(bg_surface, bg_rect)
-        
-        # Draw text
         screen.blit(text_surface, text_rect)
+    
+    def _stop_live_scan(self):
+        """Stop the live waterfall scan process"""
+        if self.live_scan_active and self.live_scan_process:
+            print("Stopping live scan process...")
+            self.live_scan_process.terminate()
+            self.live_scan_process.wait()
+            self.live_scan_process = None
+        self.live_scan_active = False
+    
+    def _stop_all_cameras(self):
+        """Stop all camera scanning"""
+        if self.micro.scanning:
+            self.micro.cam.stop()
+            self.micro.scanning = False
+        if self.spectro.scanning:
+            self.spectro.cam.stop()
+            self.spectro.scanning = False
+    
+    def _hide_all_gadgets(self):
+        """Hide all gadget displays"""
+        self.emf_gadget.visible = False
+        self.microscope_gadget.visible = False
+        self.spectral_gadget.visible = False
+        self.dashboard.visible = False
+        self.weather.visible = False
+        self.waterfall_display.visible = False
+        self.microscope_gadget_ref.visible = False
+        self.dashboard_ref.visible = False
+    
+    def _switch_to_mode(self, gadget_name):
+        """Switch to a specific gadget mode
+        
+        Args:
+            gadget_name: One of 'emf', 'microscope', 'spectral', 'dashboard', 'weather'
+        """
+        self._stop_all_cameras()
+        self._stop_live_scan()
+        self._hide_all_gadgets()
+        
+        # Show the requested gadget
+        if gadget_name == 'emf':
+            self.emf_gadget.visible = True
+        elif gadget_name == 'microscope':
+            self.microscope_gadget.visible = True
+        elif gadget_name == 'spectral':
+            self.spectral_gadget.visible = True
+        elif gadget_name == 'dashboard':
+            self.dashboard.visible = True
+        elif gadget_name == 'weather':
+            self.weather.visible = True
+        
+        # Reset scanning flags
+        self.emf_gadget.emf_scanning = False
 
     def handleEvents(self, event, fpsClock):
         if event.type == pygame.MOUSEBUTTONDOWN:
             self.beep1.play()
+            
+            # Check if click is on waterfall display
+            if self.waterfall_display.visible and self.waterfall_display.rect.collidepoint(event.pos):
+                # Convert screen coordinates to widget-relative coordinates
+                x_rel = event.pos[0] - self.waterfall_display.rect.left
+                y_rel = event.pos[1] - self.waterfall_display.rect.top
+                
+                # Get frequency from X position
+                frequency = self.waterfall_display.get_frequency_from_x(x_rel)
+                if frequency:
+                    self.waterfall_display.set_selected_frequency(frequency)
+                    self.emf_gadget.target_frequency = frequency / 1e6  # Convert to MHz
+                    print("Selected frequency: {:.3f} MHz".format(frequency / 1e6))
 
         if event.type == pygame.MOUSEBUTTONUP:
             return False
 
-    def hideInfoText(self):
-        if self.info_text[0].visible:
-            for sprite in self.info_text:
-                sprite.visible = False
-
-    def showInfoText(self):
-        for sprite in self.info_text:
-            sprite.visible = True
-            
     def scanHandler(self, item, event, clock):
-        self.hideInfoText()
+        """SCAN: Start wide spectrum survey (rtl_scan_2.py)"""
         if self.dashboard.visible:
             self.dashboard.visible = False
             self.dashboard_ref.visible = True
-        if self.microscope_gadget.visible: 
-            if self.micro.scanning == False:
+            
+        if self.microscope_gadget.visible:
+            if not self.micro.scanning:
                 self.micro.cam.start()
             self.micro.scanning = True
+            
         if self.spectral_gadget.visible:
-            if self.spectro.scanning == False:
+            if not self.spectro.scanning:
                 self.spectro.cam.start()
             self.spectro.analyzing = False
             self.spectro.scanning = True
+            
         if self.emf_gadget.visible:
-            self.emf.scanning = True            
+            self.emf.scanning = True
             self.emf_gadget.emf_scanning = True
             
-            # Reset the last spectrum file tracking so we start fresh
+            # Reset spectrum file tracking
             if hasattr(self.emf, 'last_spectrum_file'):
                 delattr(self.emf, 'last_spectrum_file')
             
-            # Use subprocess.Popen to get actual process handle
+            # Start multi-frequency scan process
             self.emf.scan_process = subprocess.Popen(
                 ['python', '/home/tricorder/rpi_lcars-master/rtl_scan_2.py', '85e6', '105e6'],
                 stdout=subprocess.PIPE,
@@ -311,33 +334,39 @@ class ScreenMain(LcarsScreen):
                     self.emf.spectrum_image = pygame.image.load("/home/tricorder/rpi_lcars-master/spectrum.png")
             except:
                 pass
-            
                 
     def recordHandler(self, item, event, clock):
-        self.hideInfoText()
+        """RECORD: Save screenshot, analyze, or demodulate FM"""
+                
+        # Microscope: Save screenshot
         if self.micro.scanning and self.microscope_gadget.visible:
-            filename = "microscope_" + format(datetime.now().strftime("%y.%m.%d.%H.%M.%S")) + ".jpg"
-            pygame.image.save(self.myScreen,"/home/tricorder/rpi_lcars-master/app/screenshots/" + filename)
+            filename = "microscope_{}.jpg".format(datetime.now().strftime("%y.%m.%d.%H.%M.%S"))
+            pygame.image.save(self.myScreen, "/home/tricorder/rpi_lcars-master/app/screenshots/" + filename)
+            
+        # Spectral: Start analysis
         if self.spectro.scanning and self.spectral_gadget.visible:
             self.spectro.scanning = False
             self.spectro.analyzing = True
             self.spectro.analyze_complete = False
-            print("analyzing...")
+            print("Analyzing spectral data...")
+            
+        # EMF: Toggle FM demodulation
         if self.emf_gadget.visible:
-            if self.tuned_in == True:
+            if self.tuned_in:
                 os.killpg(os.getpgid(self.fm_pid), signal.SIGTERM)
                 self.tuned_in = False
+                print("Stopped FM demodulation")
             else:
-                print("try to listen in to: ", self.emf_gadget.target_frequency)
-                print("'rtl_fm -f ",str(self.emf_gadget.target_frequency),"e6 -M wbfm -s 200000 -r 48000 - | play -t raw -r 48k -es -b 16 -c 1 -V1 - ")
-                process = subprocess.Popen(['bash', '-c', 'rtl_fm -f ' + str(self.emf_gadget.target_frequency) + 'e6 -M wbfm -s 200000 -r 48000 - | play -t raw -r 48k -es -b 16 -c 1 -V1 - &'], 
-                             preexec_fn=os.setsid) 
+                target_freq = self.emf_gadget.target_frequency
+                print("Tuning to {:.1f} MHz...".format(target_freq))
+                cmd = 'rtl_fm -f {}e6 -M wbfm -s 200000 -r 48000 - | play -t raw -r 48k -es -b 16 -c 1 -V1 - &'.format(target_freq)
+                process = subprocess.Popen(['bash', '-c', cmd], preexec_fn=os.setsid)
                 self.fm_pid = process.pid
                 self.tuned_in = True        
-        
             
     def analyzeHandler(self, item, event, clock):
-        self.hideInfoText() 
+        """ANALYZE: Start/stop live waterfall scan"""
+        # Microscope: Review saved images
         if self.microscope_gadget_ref.visible:
             self.microscope_gadget_ref.visible = False
             self.microscope_gadget.visible = True
@@ -345,16 +374,19 @@ class ScreenMain(LcarsScreen):
             if self.micro.scanning:
                 self.micro.cam.stop()
             self.micro.scanning = False
-            files = [f for f in glob.glob("/home/tricorder/rpi_lcars-master/app/screenshots/microscope_*.jpg")]
-            sorted_files = sorted( files, key = lambda file: os.path.getmtime(file), reverse=True)
+            files = glob.glob("/home/tricorder/rpi_lcars-master/app/screenshots/microscope_*.jpg")
+            if not files:
+                return
+            sorted_files = sorted(files, key=lambda f: os.path.getmtime(f), reverse=True)
             if self.micro.reviewing >= len(files):
                 self.micro.reviewing = 0
-            review_surf = pygame.Surface((640,480))
-            review_surf.blit(pygame.image.load(sorted_files[self.micro.reviewing]),(-299,-187))
-            print("file time:" + str(os.path.getmtime(sorted_files[self.micro.reviewing])))
+            review_surf = pygame.Surface((640, 480))
+            review_surf.blit(pygame.image.load(sorted_files[self.micro.reviewing]), (-299, -187))
             self.microscope_gadget.image = review_surf
-            self.micro.reviewing+=1
-        # Handle EMF gadget - Toggle live scanning mode
+            self.micro.reviewing += 1
+            print("Reviewing: {}".format(sorted_files[self.micro.reviewing - 1]))
+            
+        # EMF: Toggle live waterfall scan
         if self.emf_gadget.visible or self.waterfall_display.visible:
             if not self.live_scan_active:
                 # Start live scan
@@ -365,254 +397,114 @@ class ScreenMain(LcarsScreen):
                     stderr=subprocess.PIPE
                 )
                 self.live_scan_active = True
-                
-                # Show waterfall display, hide EMF static
                 self.emf_gadget.visible = False
                 self.waterfall_display.visible = True
             else:
                 # Stop live scan but keep waterfall visible (frozen)
-                print("Stopping live scan...")
-                if self.live_scan_process:
-                    self.live_scan_process.terminate()
-                    self.live_scan_process.wait()
-                    self.live_scan_process = None
-                self.live_scan_active = False
-                print("Live scan stopped - waterfall frozen")
-            
+                print("Stopping live scan - waterfall frozen")
+                self._stop_live_scan()
        
-    # TO DO: break this out into functions     
+    # Navigation handlers - consolidated
     def navHandlerUp(self, item, event, clock):
-        self.hideInfoText() 
-        if self.microscope_gadget_ref.visible:
-            self.microscope_gadget_ref.visible = False
-            self.microscope_gadget.visible = True
-        if self.microscope_gadget.visible:
-            if self.micro.scanning:
-                self.micro.cam.stop()
-            self.micro.scanning = False
-            files = [f for f in glob.glob("/home/tricorder/rpi_lcars-master/app/screenshots/microscope_*.jpg")]
-            sorted_files = sorted( files, key = lambda file: os.path.getmtime(file), reverse=True)
-            self.micro.reviewing = 0
-            review_surf = pygame.Surface((640,480))
-            review_surf.blit(pygame.image.load(sorted_files[self.micro.reviewing]),(-299,-187))
-            print("file time:" + str(os.path.getmtime(sorted_files[self.micro.reviewing])))
-            self.microscope_gadget.image = review_surf
+        self._handleMicroscopeNavigation(review_index=0)
             
     def navHandlerDown(self, item, event, clock):
-        self.hideInfoText() 
-        if self.microscope_gadget_ref.visible:
-            self.microscope_gadget_ref.visible = False
-            self.microscope_gadget.visible = True
-        if self.microscope_gadget.visible:
-            if self.micro.scanning:
-                self.micro.cam.stop()
-            self.micro.scanning = False
-            files = [f for f in glob.glob("/home/tricorder/rpi_lcars-master/app/screenshots/microscope_*.jpg")]
-            sorted_files = sorted( files, key = lambda file: os.path.getmtime(file), reverse=True)
-            self.micro.reviewing = len(files)-1
-            review_surf = pygame.Surface((640,480))
-            review_surf.blit(pygame.image.load(sorted_files[self.micro.reviewing]),(-299,-187))
-            print("file time:" + str(os.path.getmtime(sorted_files[self.micro.reviewing])))
-            self.microscope_gadget.image = review_surf     
+        self._handleMicroscopeNavigation(review_index=-1)
                        
     def navHandlerLeft(self, item, event, clock):
-        self.hideInfoText() 
-        if self.microscope_gadget_ref.visible:
-            self.microscope_gadget_ref.visible = False
-            self.microscope_gadget.visible = True
-        if self.microscope_gadget.visible:
-            if self.micro.scanning:
-                self.micro.cam.stop()
-            self.micro.scanning = False
-            files = [f for f in glob.glob("/home/tricorder/rpi_lcars-master/app/screenshots/microscope_*.jpg")]
-            sorted_files = sorted( files, key = lambda file: os.path.getmtime(file), reverse=True)
-            if self.micro.reviewing >= len(files):
-                self.micro.reviewing = 0
-            review_surf = pygame.Surface((640,480))
-            review_surf.blit(pygame.image.load(sorted_files[self.micro.reviewing]),(-299,-187))
-            print("file time:" + str(os.path.getmtime(sorted_files[self.micro.reviewing])))
-            self.microscope_gadget.image = review_surf
-            self.micro.reviewing+=1
+        self._handleMicroscopeNavigation(increment=-1)
         if self.emf_gadget.emf_scanning:
-            print("moving the needle")
-            self.emf_gadget.target_frequency-=1
+            self.emf_gadget.target_frequency -= 1
                           
     def navHandlerRight(self, item, event, clock):
-        self.hideInfoText() 
+        self._handleMicroscopeNavigation(increment=1)
+        if self.emf_gadget.emf_scanning:
+            self.emf_gadget.target_frequency += 1
+            
+    def _handleMicroscopeNavigation(self, review_index=None, increment=None):
+        """Handle microscope image navigation
+        
+        Args:
+            review_index: If set, jump to specific index (0=first, -1=last)
+            increment: If set, move by this amount (1=next, -1=previous)
+        """
+        
         if self.microscope_gadget_ref.visible:
             self.microscope_gadget_ref.visible = False
             self.microscope_gadget.visible = True
-        if self.microscope_gadget.visible:
-            if self.micro.scanning:
-                self.micro.cam.stop()
-            self.micro.scanning = False
-            files = [f for f in glob.glob("/home/tricorder/rpi_lcars-master/app/screenshots/microscope_*.jpg")]
-            sorted_files = sorted( files, key = lambda file: os.path.getmtime(file), reverse=True)
+            
+        if not self.microscope_gadget.visible:
+            return
+            
+        # Stop live scanning if active
+        if self.micro.scanning:
+            self.micro.cam.stop()
+        self.micro.scanning = False
+        
+        # Get sorted list of microscope images
+        files = glob.glob("/home/tricorder/rpi_lcars-master/app/screenshots/microscope_*.jpg")
+        if not files:
+            return
+            
+        sorted_files = sorted(files, key=lambda f: os.path.getmtime(f), reverse=True)
+        
+        # Update review index
+        if review_index is not None:
+            if review_index == -1:
+                self.micro.reviewing = len(files) - 1
+            else:
+                self.micro.reviewing = review_index
+        elif increment is not None:
+            self.micro.reviewing += increment
             if self.micro.reviewing >= len(files):
                 self.micro.reviewing = 0
-            review_surf = pygame.Surface((640,480))
-            review_surf.blit(pygame.image.load(sorted_files[self.micro.reviewing]),(-299,-187))
-            print("file time:" + str(os.path.getmtime(sorted_files[self.micro.reviewing])))
-            self.microscope_gadget.image = review_surf
-            self.micro.reviewing-=1
-        if self.emf_gadget.emf_scanning:
-            self.emf_gadget.target_frequency+=1
+            elif self.micro.reviewing < 0:
+                self.micro.reviewing = len(files) - 1
+        
+        # Load and display the image
+        review_surf = pygame.Surface((640, 480))
+        review_surf.blit(pygame.image.load(sorted_files[self.micro.reviewing]), (-299, -187))
+        self.microscope_gadget.image = review_surf
+        print("Reviewing file: {} (mtime: {})".format(
+            sorted_files[self.micro.reviewing], 
+            os.path.getmtime(sorted_files[self.micro.reviewing])
+        ))
             
     # TO DO: put these into an array and iterate over them instead
     def gaugesHandler(self, item, event, clock):
-        self.hideInfoText()
-        if self.micro.scanning:
-            self.micro.cam.stop()
-            self.micro.scanning = False
-        if self.spectro.scanning:
-            self.spectro.cam.stop()
-        self.spectro.scanning = False
-        
-        # Stop live scan if active
-        if self.live_scan_active:
-            if self.live_scan_process:
-                self.live_scan_process.terminate()
-                self.live_scan_process.wait()
-                self.live_scan_process = None
-            self.live_scan_active = False
-            
-        self.micro.scanning = False
-        self.emf_gadget.visible = False
-        self.emf_gadget.emf_scanning = False
-        self.microscope_gadget.visible = False
-        self.spectral_gadget.visible = False
-        self.waterfall_display.visible = False
-        self.dashboard.visible = True
-        self.weather.visible = False
-        self.microscope_gadget_ref.visible = False
-        self.dashboard_ref.visible = False
+        """Switch to GEOSPATIAL dashboard view"""
+        self._switch_to_mode('dashboard')
 
     def microscopeHandler(self, item, event, clock):
-    
-        if self.spectro.scanning == True:
-            self.spectro.cam.stop()
-        self.spectro.scanning = False
-        
-        # Stop live scan if active
-        if self.live_scan_active:
-            if self.live_scan_process:
-                self.live_scan_process.terminate()
-                self.live_scan_process.wait()
-                self.live_scan_process = None
-            self.live_scan_active = False
-            
-        if self.micro.scanning == False:
+        """Switch to MICROSCOPE view and start scanning"""
+        self._switch_to_mode('microscope')
+        if not self.micro.scanning:
             self.micro.cam.start()
         self.micro.scanning = True
         self.micro.reviewing = 0
-        self.hideInfoText()
-        self.emf_gadget.visible = False
-        self.emf_gadget.emf_scanning = False
-        self.waterfall_display.visible = False
-        self.microscope_gadget.visible = True
-        self.dashboard.visible = False
-        self.spectral_gadget.visible = False
-        self.weather.visible = False
-        self.microscope_gadget_ref.visible = False
-        self.dashboard_ref.visible = False
 
     def weatherHandler(self, item, event, clock):
-        self.hideInfoText()
-        if self.micro.scanning:
-            self.micro.cam.stop()
-        if self.spectro.scanning:
-            self.spectro.cam.stop()
-        self.spectro.scanning = False
-        self.micro.scanning = False
-        
-        # Stop live scan if active
-        if self.live_scan_active:
-            if self.live_scan_process:
-                self.live_scan_process.terminate()
-                self.live_scan_process.wait()
-                self.live_scan_process = None
-            self.live_scan_active = False
-            
-        self.emf_gadget.visible = False
-        self.emf_gadget.emf_scanning = False
-        self.waterfall_display.visible = False
-        self.spectral_gadget.visible = False
-        self.microscope_gadget.visible = False
-        self.dashboard.visible = False
-        self.weather.visible = True
-        self.microscope_gadget_ref.visible = False
-        self.dashboard_ref.visible = False
+        """Switch to ATMOSPHERIC weather view"""
+        self._switch_to_mode('weather')
 
-    def homeHandler(self, item, event, clock):
-        self.showInfoText()
-        if self.micro.scanning:
-            self.micro.cam.stop()
-        if self.spectro.scanning:
-            self.spectro.cam.stop()
-        self.spectro.scanning = False
-        self.micro.scanning = False
-        self.emf_gadget.visible = False
-        self.emf_gadget.emf_scanning = False
-        self.spectral_gadget.visible = False
-        self.microscope_gadget.visible = False
-        self.dashboard.visible = False
-        self.weather.visible = False
-        self.microscope_gadget_ref.visible = False
-        self.dashboard_ref.visible = False
-        
     def emfHandler(self, item, event, clock):
-        self.hideInfoText()
-        if self.micro.scanning:
-            self.micro.cam.stop()
-        if self.spectro.scanning:
-            self.spectro.cam.stop()
-        self.spectro.scanning = False
-        self.micro.scanning = False
-        
-        # Stop live scan if active and switch back to static EMF view
-        if self.live_scan_active:
-            if self.live_scan_process:
-                self.live_scan_process.terminate()
-                self.live_scan_process.wait()
-                self.live_scan_process = None
-            self.live_scan_active = False
-            
-        self.emf_gadget.visible = True
-        self.waterfall_display.visible = False
-        self.spectral_gadget.visible = False
-        self.microscope_gadget.visible = False
-        self.dashboard.visible = False
-        self.weather.visible = False
-        self.microscope_gadget_ref.visible = False
-        self.dashboard_ref.visible = False
+        """Switch to EMF spectrum analyzer view"""
+        self._switch_to_mode('emf')
         
     def spectralHandler(self, item, event, clock):
-        self.hideInfoText()
-        if self.micro.scanning:
-            self.micro.cam.stop()
-        self.micro.scanning = False
-        
-        # Stop live scan if active
-        if self.live_scan_active:
-            if self.live_scan_process:
-                self.live_scan_process.terminate()
-                self.live_scan_process.wait()
-                self.live_scan_process = None
-            self.live_scan_active = False
-            
-        if self.spectro.scanning == False and self.spectro.analyzing == False:
+        """Switch to SPECTRAL analysis view"""
+        self._switch_to_mode('spectral')
+        if not self.spectro.scanning and not self.spectro.analyzing:
             self.spectro.cam.start()
         self.spectro.scanning = True
         self.spectro.analyzing = False
-        self.spectral_gadget.visible = True
-        self.emf_gadget.visible = False
+    
+    def homeHandler(self, item, event, clock):
+        """Return to home screen with info text"""
+        self._stop_all_cameras()
+        self._stop_live_scan()
+        self._hide_all_gadgets()
         self.emf_gadget.emf_scanning = False
-        self.waterfall_display.visible = False
-        self.microscope_gadget.visible = False
-        self.dashboard.visible = False
-        self.weather.visible = False
-        self.microscope_gadget_ref.visible = False
-        self.dashboard_ref.visible = False
         
     def logoutHandler(self, item, event, clock):
         from screens.authorize import ScreenAuthorize
