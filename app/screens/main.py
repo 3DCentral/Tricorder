@@ -1,8 +1,10 @@
 from datetime import datetime
+
 from ui.widgets.background import LcarsBackgroundImage, LcarsImage
 from ui.widgets.gifimage import LcarsGifImage
 from ui.widgets.lcars_widgets import *
 from ui.widgets.waterfall import LcarsWaterfall
+from ui.widgets.frequency_selector import LcarsFrequencySelector
 from ui.widgets.screen import LcarsScreen
 from time import sleep
 import subprocess
@@ -10,20 +12,31 @@ import signal
 import os
 import glob
 
+
+from datasources.network import get_ip_address_string
+
+
 class ScreenMain(LcarsScreen):
     def setup(self, all_sprites):
         all_sprites.add(LcarsBackgroundImage("assets/lcars_screen_i5.png"),
                         layer=0)
+
         # panel text
         all_sprites.add(LcarsText(colours.BLACK, (15, 44), "LCARS 105"),
                         layer=1)
                         
+        #all_sprites.add(LcarsText(colours.ORANGE, (0, 48), "TRICORDER", 2),
+        #                layer=1)
         all_sprites.add(LcarsBlockMedium(colours.RED_BROWN, (186, 5), "SCAN", self.scanHandler),
                         layer=1)
         all_sprites.add(LcarsBlockSmall(colours.ORANGE, (357, 5), "RECORD", self.recordHandler),
                         layer=1)
         all_sprites.add(LcarsBlockLarge(colours.BEIGE, (463, 5), "ANALYZE", self.analyzeHandler),
                         layer=1)
+
+        self.ip_address = LcarsText(colours.BLACK, (444, 520),
+                                    get_ip_address_string())
+        all_sprites.add(self.ip_address, layer=1)
 
         # date display
         self.stardate = LcarsText(colours.BLUE, (12, 888), "STAR DATE", 1.5)
@@ -92,18 +105,35 @@ class ScreenMain(LcarsScreen):
         self.waterfall_display = LcarsWaterfall((187, 299), (640, 480))
         self.waterfall_display.visible = False
         all_sprites.add(self.waterfall_display, layer=2)
+        
+        # Frequency selector for SCAN mode (top 30%)
+        self.frequency_selector = LcarsFrequencySelector((187, 299), (640, 144))
+        self.frequency_selector.visible = False
+        all_sprites.add(self.frequency_selector, layer=2)
+        
+        # Spectrum scan display for SCAN mode (bottom 70%, below frequency selector)
+        # Position: 187 + 144 = 443 from top, size: 640x336
+        self.spectrum_scan_display = LcarsImage("assets/emf.png", (187+480/3, 299))
+        self.spectrum_scan_display.visible = False
+        all_sprites.add(self.spectrum_scan_display, layer=2)
+        
+        # Dimensions for the scan display area (70% of 480 = 336)
+        self.scan_display_size = (640, 336)
+
 
         #all_sprites.add(LcarsMoveToMouse(colours.WHITE), layer=1)
         self.beep1 = Sound("assets/audio/panel/201.wav")
         Sound("assets/audio/panel/220.wav").play()
         
         self.tuned_in = False
+        
         # Initialize spectrum checking throttle
         self.last_spectrum_check = 0
         
         # Scanning animation state
         self.scan_animation_frame = 0
         self.last_animation_update = 0
+
 
         # Live scan state
         self.live_scan_process = None
@@ -112,6 +142,7 @@ class ScreenMain(LcarsScreen):
 
     def update(self, screenSurface, fpsClock):
         if pygame.time.get_ticks() - self.lastClockUpdate > 1000:
+            #self.stardate.setText("STAR DATE {}".format(datetime.now().strftime("%d%m.%y %H:%M:%S")))
             hour_formatted = int(int(format(datetime.now().strftime("%H"))) / 24 * 10)
             self.stardate.setText("STAR DATE {}".format(datetime.now().strftime("%y%m%d.")) + str(hour_formatted))
             self.lastClockUpdate = pygame.time.get_ticks()
@@ -122,7 +153,7 @@ class ScreenMain(LcarsScreen):
             self.spectral_gadget.image = self.spectro.micro_image
         
         # LIVE EMF SPECTRUM UPDATES
-        if self.emf_gadget.visible and self.emf.scanning:
+        if (self.emf_gadget.visible or self.spectrum_scan_display.visible) and self.emf.scanning:
             current_time = pygame.time.get_ticks()
             
             # Check if scan process is still running
@@ -133,10 +164,18 @@ class ScreenMain(LcarsScreen):
                     print("Scan process completed with code: {}".format(poll_result))
                     self.emf.scanning = False
                     self.emf_gadget.emf_scanning = False
+                    # Clear scanning highlight
+                    self.frequency_selector.clear_scanning_range()
                     # Load the final spectrum image
                     try:
-                        self.emf.spectrum_image = pygame.image.load("/home/tricorder/rpi_lcars-master/spectrum.png")
-                        self.emf_gadget.image = self.emf.spectrum_image
+                        loaded_image = pygame.image.load("/home/tricorder/rpi_lcars-master/spectrum.png")
+                        # Scale to fit the scan display area (640x336)
+                        scaled_image = pygame.transform.scale(loaded_image, self.scan_display_size)
+                        self.emf.spectrum_image = scaled_image
+                        if self.emf_gadget.visible:
+                            self.emf_gadget.image = loaded_image  # Full size for EMF view
+                        if self.spectrum_scan_display.visible:
+                            self.spectrum_scan_display.image = scaled_image  # Scaled for SCAN view
                     except:
                         pass
             
@@ -160,9 +199,14 @@ class ScreenMain(LcarsScreen):
                             # Only reload if it's a new file
                             if not hasattr(self.emf, 'last_spectrum_file') or latest_file != self.emf.last_spectrum_file:
                                 # Try to load it
-                                new_image = pygame.image.load(latest_file)
-                                self.emf.spectrum_image = new_image
-                                self.emf_gadget.image = new_image
+                                loaded_image = pygame.image.load(latest_file)
+                                # Scale to fit scan display if in SCAN mode
+                                if self.spectrum_scan_display.visible:
+                                    scaled_image = pygame.transform.scale(loaded_image, self.scan_display_size)
+                                    self.spectrum_scan_display.image = scaled_image
+                                if self.emf_gadget.visible:
+                                    self.emf_gadget.image = loaded_image
+                                self.emf.spectrum_image = loaded_image
                                 self.emf.last_spectrum_file = latest_file
                                 print("Loaded spectrum update: {}".format(latest_file))
                         else:
@@ -205,9 +249,13 @@ class ScreenMain(LcarsScreen):
         """Draw a scanning animation indicator above the EMF display"""
         dots = [".", "..", "...", "....", ".....", "......", ".......", "........", "........."]
         scan_text = "....." + dots[self.scan_animation_frame]
+        
+        x_pos = 187 + 450
+        y_pos = 299 - 140
+        
         font = pygame.font.Font("assets/swiss911.ttf", 20)
         text_surface = font.render(scan_text, True, (255, 255, 0))
-        text_rect = text_surface.get_rect(center=(637, 159))
+        text_rect = text_surface.get_rect(center=(x_pos, y_pos))
         
         padding = 10
         bg_rect = pygame.Rect(
@@ -248,6 +296,8 @@ class ScreenMain(LcarsScreen):
         self.dashboard.visible = False
         self.weather.visible = False
         self.waterfall_display.visible = False
+        self.frequency_selector.visible = False
+        self.spectrum_scan_display.visible = False
         self.microscope_gadget_ref.visible = False
         self.dashboard_ref.visible = False
     
@@ -295,9 +345,10 @@ class ScreenMain(LcarsScreen):
 
         if event.type == pygame.MOUSEBUTTONUP:
             return False
-
+            
     def scanHandler(self, item, event, clock):
-        """SCAN: Start wide spectrum survey (rtl_scan_2.py)"""
+        """SCAN: Start wide spectrum survey with frequency selection"""
+        
         if self.dashboard.visible:
             self.dashboard.visible = False
             self.dashboard_ref.visible = True
@@ -313,31 +364,68 @@ class ScreenMain(LcarsScreen):
             self.spectro.analyzing = False
             self.spectro.scanning = True
             
-        if self.emf_gadget.visible:
-            self.emf.scanning = True
-            self.emf_gadget.emf_scanning = True
+        # EMF mode: Show frequency selector and handle scanning
+        if self.emf_gadget.visible or self.frequency_selector.visible:
+            # First time: Show frequency selector
+            if self.emf_gadget.visible:
+                self.emf_gadget.visible = False
+                self.frequency_selector.visible = True
+                self.spectrum_scan_display.visible = True
+                print("Select a target frequency on the scale above, then click SCAN again")
+                return
             
-            # Reset spectrum file tracking
-            if hasattr(self.emf, 'last_spectrum_file'):
-                delattr(self.emf, 'last_spectrum_file')
+            # Subsequent clicks: Start scan if frequency selected
+            if self.frequency_selector.visible:
+                if not hasattr(self.frequency_selector, 'selected_frequency') or self.frequency_selector.selected_frequency is None:
+                    print("Please select a target frequency first")
+                    return
+                
+                target_freq = self.frequency_selector.selected_frequency
+                bandwidth = 20e6  # 20 MHz bandwidth for now
+                
+                start_freq = int(target_freq - bandwidth / 2)
+                end_freq = int(target_freq + bandwidth / 2)
+                
+                # Ensure frequencies are within valid range
+                start_freq = max(int(50e6), start_freq)  # RTL-SDR typically starts at ~50 MHz
+                end_freq = min(int(2.2e9), end_freq)
+                
+                print("Starting spectrum scan: {} to {}".format(
+                    self.frequency_selector._format_frequency(start_freq),
+                    self.frequency_selector._format_frequency(end_freq)
+                ))
+                
+                self.emf.scanning = True
+                self.emf_gadget.emf_scanning = True
+                
+                # Reset spectrum file tracking
+                if hasattr(self.emf, 'last_spectrum_file'):
+                    delattr(self.emf, 'last_spectrum_file')
+                
+                # Highlight the scanning range on the selector
+                self.frequency_selector.set_scanning_range(start_freq, end_freq)
+                
+                # Start multi-frequency scan process
+                self.emf.scan_process = subprocess.Popen(
+                    ['python', '/home/tricorder/rpi_lcars-master/rtl_scan_2.py', 
+                     str(start_freq), str(end_freq)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                
+                # Clear the spectrum scan display
+                try:
+                    # Create a blank image or load placeholder
+                    blank_surface = pygame.Surface((640, 336))  # 70% of 480
+                    blank_surface.fill((0, 0, 0))
+                    self.spectrum_scan_display.image = blank_surface
+                except:
+                    pass
             
-            # Start multi-frequency scan process
-            self.emf.scan_process = subprocess.Popen(
-                ['python', '/home/tricorder/rpi_lcars-master/rtl_scan_2.py', '85e6', '105e6'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            
-            # Try to load initial spectrum if it exists
-            try:
-                if os.path.exists("/home/tricorder/rpi_lcars-master/spectrum.png"):
-                    self.emf.spectrum_image = pygame.image.load("/home/tricorder/rpi_lcars-master/spectrum.png")
-            except:
-                pass
                 
     def recordHandler(self, item, event, clock):
         """RECORD: Save screenshot, analyze, or demodulate FM"""
-                
+        
         # Microscope: Save screenshot
         if self.micro.scanning and self.microscope_gadget.visible:
             filename = "microscope_{}.jpg".format(datetime.now().strftime("%y.%m.%d.%H.%M.%S"))
@@ -363,9 +451,11 @@ class ScreenMain(LcarsScreen):
                 process = subprocess.Popen(['bash', '-c', cmd], preexec_fn=os.setsid)
                 self.fm_pid = process.pid
                 self.tuned_in = True        
+        
             
     def analyzeHandler(self, item, event, clock):
         """ANALYZE: Start/stop live waterfall scan"""
+        
         # Microscope: Review saved images
         if self.microscope_gadget_ref.visible:
             self.microscope_gadget_ref.visible = False
@@ -403,6 +493,7 @@ class ScreenMain(LcarsScreen):
                 # Stop live scan but keep waterfall visible (frozen)
                 print("Stopping live scan - waterfall frozen")
                 self._stop_live_scan()
+            
        
     # Navigation handlers - consolidated
     def navHandlerUp(self, item, event, clock):
@@ -420,7 +511,7 @@ class ScreenMain(LcarsScreen):
         self._handleMicroscopeNavigation(increment=1)
         if self.emf_gadget.emf_scanning:
             self.emf_gadget.target_frequency += 1
-            
+    
     def _handleMicroscopeNavigation(self, review_index=None, increment=None):
         """Handle microscope image navigation
         
@@ -490,6 +581,9 @@ class ScreenMain(LcarsScreen):
     def emfHandler(self, item, event, clock):
         """Switch to EMF spectrum analyzer view"""
         self._switch_to_mode('emf')
+        # Make sure frequency selector and spectrum scan display are hidden
+        self.frequency_selector.visible = False
+        self.spectrum_scan_display.visible = False
         
     def spectralHandler(self, item, event, clock):
         """Switch to SPECTRAL analysis view"""
