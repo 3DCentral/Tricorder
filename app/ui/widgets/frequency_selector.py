@@ -228,12 +228,6 @@ class LcarsFrequencySelector(LcarsWidget):
             highlight_surface.fill((255, 153, 0))  # Orange
             surface.blit(highlight_surface, (x_start, y_base - 15))
     
-    def _draw_title(self, surface):
-        """Draw title"""
-        font = pygame.font.Font("assets/swiss911.ttf", 20)
-        text = font.render("SELECT TARGET FREQUENCY", True, (255, 255, 0))
-        text_rect = text.get_rect(center=(self.display_width // 2, 15))
-        surface.blit(text, text_rect)
     
     def update(self, screen):
         """Update and render the frequency selector"""
@@ -244,7 +238,6 @@ class LcarsFrequencySelector(LcarsWidget):
         self.image.fill((0, 0, 0))
         
         # Draw components
-        self._draw_title(self.image)
         self._draw_scale(self.image)
         self._draw_scanning_highlight(self.image)
         self._draw_selection_marker(self.image)
