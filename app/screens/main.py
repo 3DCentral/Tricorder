@@ -6,6 +6,7 @@ from ui.widgets.lcars_widgets import *
 from ui.widgets.waterfall import LcarsWaterfall
 from ui.widgets.frequency_selector import LcarsFrequencySelector
 from ui.widgets.screen import LcarsScreen
+import numpy as np
 from time import sleep
 import subprocess
 import signal
@@ -13,30 +14,18 @@ import os
 import glob
 
 
-from datasources.network import get_ip_address_string
-
-
 class ScreenMain(LcarsScreen):
     def setup(self, all_sprites):
         all_sprites.add(LcarsBackgroundImage("assets/lcars_screen_i5.png"),
                         layer=0)
-
-        # panel text
         all_sprites.add(LcarsText(colours.BLACK, (15, 44), "LCARS 105"),
                         layer=1)
-                        
-        #all_sprites.add(LcarsText(colours.ORANGE, (0, 48), "TRICORDER", 2),
-        #                layer=1)
         all_sprites.add(LcarsBlockMedium(colours.RED_BROWN, (186, 5), "SCAN", self.scanHandler),
                         layer=1)
         all_sprites.add(LcarsBlockSmall(colours.ORANGE, (357, 5), "RECORD", self.recordHandler),
                         layer=1)
         all_sprites.add(LcarsBlockLarge(colours.BEIGE, (463, 5), "ANALYZE", self.analyzeHandler),
                         layer=1)
-
-        self.ip_address = LcarsText(colours.BLACK, (444, 520),
-                                    get_ip_address_string())
-        all_sprites.add(self.ip_address, layer=1)
 
         # date display
         self.stardate = LcarsText(colours.BLUE, (12, 888), "STAR DATE", 1.5)
@@ -120,7 +109,6 @@ class ScreenMain(LcarsScreen):
         # Dimensions for the scan display area (70% of 480 = 336)
         self.scan_display_size = (640, 336)
 
-
         #all_sprites.add(LcarsMoveToMouse(colours.WHITE), layer=1)
         self.beep1 = Sound("assets/audio/panel/201.wav")
         Sound("assets/audio/panel/220.wav").play()
@@ -133,7 +121,6 @@ class ScreenMain(LcarsScreen):
         # Scanning animation state
         self.scan_animation_frame = 0
         self.last_animation_update = 0
-
 
         # Live scan state
         self.live_scan_process = None
@@ -231,7 +218,6 @@ class ScreenMain(LcarsScreen):
                 self.last_waterfall_check = current_time
                 try:
                     # Load waterfall data files
-                    import numpy as np
                     waterfall_data = np.load("/home/tricorder/rpi_lcars-master/spectrum_live_waterfall.npy")
                     psd_data = np.load("/home/tricorder/rpi_lcars-master/spectrum_live_psd.npy")
                     frequencies = np.load("/home/tricorder/rpi_lcars-master/spectrum_live_frequencies.npy")
@@ -249,13 +235,10 @@ class ScreenMain(LcarsScreen):
         """Draw a scanning animation indicator above the EMF display"""
         dots = [".", "..", "...", "....", ".....", "......", ".......", "........", "........."]
         scan_text = "....." + dots[self.scan_animation_frame]
-        
-        x_pos = 187 + 450
-        y_pos = 299 - 140
-        
+
         font = pygame.font.Font("assets/swiss911.ttf", 20)
         text_surface = font.render(scan_text, True, (255, 255, 0))
-        text_rect = text_surface.get_rect(center=(x_pos, y_pos))
+        text_rect = text_surface.get_rect(center=(637, 159))
         
         padding = 10
         bg_rect = pygame.Rect(
@@ -364,6 +347,10 @@ class ScreenMain(LcarsScreen):
             self.spectro.analyzing = False
             self.spectro.scanning = True
             
+        if self.waterfall_display.visible:
+            self.waterfall_display.visible = False
+            self.frequency_selector.visible = True
+            
         # EMF mode: Show frequency selector and handle scanning
         if self.emf_gadget.visible or self.frequency_selector.visible:
             # First time: Show frequency selector
@@ -439,13 +426,13 @@ class ScreenMain(LcarsScreen):
             print("Analyzing spectral data...")
             
         # EMF: Toggle FM demodulation
-        if self.emf_gadget.visible:
+        if self.spectrum_scan_display.visible:
             if self.tuned_in:
                 os.killpg(os.getpgid(self.fm_pid), signal.SIGTERM)
                 self.tuned_in = False
                 print("Stopped FM demodulation")
             else:
-                target_freq = self.emf_gadget.target_frequency
+                target_freq = self.frequency_selector.selected_frequency/1e6
                 print("Tuning to {:.1f} MHz...".format(target_freq))
                 cmd = 'rtl_fm -f {}e6 -M wbfm -s 200000 -r 48000 - | play -t raw -r 48k -es -b 16 -c 1 -V1 - &'.format(target_freq)
                 process = subprocess.Popen(['bash', '-c', cmd], preexec_fn=os.setsid)
@@ -477,12 +464,15 @@ class ScreenMain(LcarsScreen):
             print("Reviewing: {}".format(sorted_files[self.micro.reviewing - 1]))
             
         # EMF: Toggle live waterfall scan
-        if self.emf_gadget.visible or self.waterfall_display.visible:
+        if self.emf_gadget.visible  or self.frequency_selector.visible or self.waterfall_display.visible:
+            self.frequency_selector.visible = False
+            self.spectrum_scan_display.visible = False
             if not self.live_scan_active:
                 # Start live scan
-                print("Starting live scan at 99.5 MHz...")
+                target_freq = self.frequency_selector.selected_frequency / 1e6;
+                print("Starting live scan at ",target_freq," MHz...")
                 self.live_scan_process = subprocess.Popen(
-                    ['python', '/home/tricorder/rpi_lcars-master/rtl_scan_live.py', '99.5e6'],
+                    ['python', '/home/tricorder/rpi_lcars-master/rtl_scan_live.py', str(target_freq)+"e6"],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE
                 )
@@ -526,7 +516,7 @@ class ScreenMain(LcarsScreen):
             
         if not self.microscope_gadget.visible:
             return
-            
+             
         # Stop live scanning if active
         if self.micro.scanning:
             self.micro.cam.stop()
@@ -594,7 +584,7 @@ class ScreenMain(LcarsScreen):
         self.spectro.analyzing = False
     
     def homeHandler(self, item, event, clock):
-        """Return to home screen with info text"""
+        """Return to home screen"""
         self._stop_all_cameras()
         self._stop_live_scan()
         self._hide_all_gadgets()
