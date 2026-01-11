@@ -128,6 +128,18 @@ class ScreenMain(LcarsScreen):
         self.live_scan_active = False
         self.last_waterfall_check = 0
         
+        # Waterfall bandwidth adjustment state
+        self.waterfall_bandwidth = 2.4e6  # Default 2.4 MHz for RTL-SDR
+        self.bandwidth_options = [
+            200000,   # 200 kHz - Very narrow (single channel)
+            500000,   # 500 kHz
+            1000000,  # 1 MHz
+            1200000,  # 1.2 MHz
+            2400000,  # 2.4 MHz - Default RTL-SDR bandwidth
+            3200000,  # 3.2 MHz - Maximum for stable operation
+        ]
+        self.bandwidth_index = 4  # Start at 2.4 MHz (index 4)
+        
         # Track scan frequency range
         self.current_scan_start_freq = None
         self.current_scan_end_freq = None
@@ -270,6 +282,113 @@ class ScreenMain(LcarsScreen):
             except (OSError, ProcessLookupError, AttributeError) as e:
                 print("FM demodulation already stopped")
             self.tuned_in = False
+    
+    def _adjust_waterfall_bandwidth(self, direction):
+        """
+        Adjust waterfall bandwidth and restart live scan
+        
+        Args:
+            direction: 1 for increase, -1 for decrease
+        """
+        if not self.live_scan_active:
+            return
+        
+        # Adjust bandwidth index
+        self.bandwidth_index += direction
+        self.bandwidth_index = max(0, min(len(self.bandwidth_options) - 1, self.bandwidth_index))
+        
+        # Update bandwidth
+        self.waterfall_bandwidth = self.bandwidth_options[self.bandwidth_index]
+        
+        # Get current center frequency
+        if hasattr(self, 'live_scan_center_freq'):
+            center_freq = self.live_scan_center_freq
+        else:
+            center_freq = self.waterfall_display.selected_frequency if self.waterfall_display.selected_frequency else 100e6
+        
+        print("\n" + "="*60)
+        print("WATERFALL BANDWIDTH ADJUSTMENT")
+        print("="*60)
+        print("New bandwidth: {:.1f} MHz ({:.0f} kHz)".format(
+            self.waterfall_bandwidth / 1e6,
+            self.waterfall_bandwidth / 1000))
+        print("Center frequency: {:.3f} MHz".format(center_freq / 1e6))
+        print("Frequency range: {:.3f} - {:.3f} MHz".format(
+            (center_freq - self.waterfall_bandwidth/2) / 1e6,
+            (center_freq + self.waterfall_bandwidth/2) / 1e6))
+        print("="*60 + "\n")
+        
+        # Restart live scan with new bandwidth
+        self._restart_live_scan(center_freq, self.waterfall_bandwidth)
+    
+    def _adjust_waterfall_frequency(self, direction):
+        """
+        Adjust waterfall center frequency
+        
+        Args:
+            direction: 1 for increase, -1 for decrease
+        """
+        if not self.live_scan_active:
+            return
+        
+        # Get current center frequency
+        if hasattr(self, 'live_scan_center_freq'):
+            center_freq = self.live_scan_center_freq
+        else:
+            center_freq = self.waterfall_display.selected_frequency if self.waterfall_display.selected_frequency else 100e6
+        
+        # Adjust frequency by 10% of bandwidth (allows fine tuning)
+        freq_step = self.waterfall_bandwidth * 0.1
+        center_freq += (direction * freq_step)
+        
+        # Clamp to valid SDR range (24 MHz to 1.766 GHz for RTL-SDR)
+        center_freq = max(24e6, min(1766e6, center_freq))
+        
+        print("\n" + "="*60)
+        print("WATERFALL FREQUENCY ADJUSTMENT")
+        print("="*60)
+        print("New center frequency: {:.3f} MHz".format(center_freq / 1e6))
+        print("Bandwidth: {:.1f} MHz".format(self.waterfall_bandwidth / 1e6))
+        print("Frequency range: {:.3f} - {:.3f} MHz".format(
+            (center_freq - self.waterfall_bandwidth/2) / 1e6,
+            (center_freq + self.waterfall_bandwidth/2) / 1e6))
+        print("="*60 + "\n")
+        
+        # Restart live scan with new center frequency
+        self._restart_live_scan(center_freq, self.waterfall_bandwidth)
+    
+    def _restart_live_scan(self, center_freq, sample_rate):
+        """
+        Restart live waterfall scan with new parameters
+        
+        Args:
+            center_freq: Center frequency in Hz
+            sample_rate: Sample rate (bandwidth) in Hz
+        """
+        # Stop current scan
+        if self.live_scan_process:
+            self.live_scan_process.terminate()
+            self.live_scan_process.wait()
+        
+        # Give SDR time to close
+        import time
+        time.sleep(0.3)
+        
+        # Store current parameters
+        self.live_scan_center_freq = center_freq
+        self.waterfall_bandwidth = sample_rate
+        
+        # Start new scan
+        self.live_scan_process = subprocess.Popen(
+            ['python', '/home/tricorder/rpi_lcars-master/rtl_scan_live.py', 
+             str(int(center_freq)), str(int(sample_rate))],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        self.live_scan_active = True
+        
+        print("Live scan restarted at {:.3f} MHz with {:.1f} MHz bandwidth".format(
+            center_freq / 1e6, sample_rate / 1e6))
     
     def _get_demodulation_params(self, freq_mhz):
         """
@@ -759,17 +878,41 @@ class ScreenMain(LcarsScreen):
        
     # Navigation handlers - consolidated
     def navHandlerUp(self, item, event, clock):
+        # If waterfall active, increase bandwidth
+        if self.waterfall_display.visible and self.live_scan_active:
+            self._adjust_waterfall_bandwidth(1)  # Increase
+            return
+        
+        # Otherwise handle microscope navigation
         self._handleMicroscopeNavigation(review_index=0)
             
     def navHandlerDown(self, item, event, clock):
+        # If waterfall active, decrease bandwidth
+        if self.waterfall_display.visible and self.live_scan_active:
+            self._adjust_waterfall_bandwidth(-1)  # Decrease
+            return
+        
+        # Otherwise handle microscope navigation
         self._handleMicroscopeNavigation(review_index=-1)
                        
     def navHandlerLeft(self, item, event, clock):
+        # If waterfall active, decrease frequency
+        if self.waterfall_display.visible and self.live_scan_active:
+            self._adjust_waterfall_frequency(-1)  # Decrease
+            return
+        
+        # Otherwise handle microscope navigation and EMF
         self._handleMicroscopeNavigation(increment=-1)
         if self.emf_gadget.emf_scanning:
             self.emf_gadget.target_frequency -= 1
                           
     def navHandlerRight(self, item, event, clock):
+        # If waterfall active, increase frequency
+        if self.waterfall_display.visible and self.live_scan_active:
+            self._adjust_waterfall_frequency(1)  # Increase
+            return
+        
+        # Otherwise handle microscope navigation and EMF
         self._handleMicroscopeNavigation(increment=1)
         if self.emf_gadget.emf_scanning:
             self.emf_gadget.target_frequency += 1
