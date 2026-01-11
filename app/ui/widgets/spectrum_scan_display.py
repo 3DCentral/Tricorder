@@ -5,7 +5,7 @@ from ui.widgets.sprite import LcarsWidget
 
 class LcarsSpectrumScanDisplay(LcarsWidget):
     """
-    Spectrum scan display widget for wide-band SDR spectrum visualization
+    Interactive spectrum scan display widget for wide-band SDR spectrum visualization
     Shows the result of a sweep scan with ability to click to select target frequency
     """
     
@@ -27,29 +27,46 @@ class LcarsSpectrumScanDisplay(LcarsWidget):
         # Spectrum image (loaded from file)
         self.spectrum_image = None
         
-        # Frequency range info
+        # Frequency range info (set when scan completes)
         self.freq_min = None
         self.freq_max = None
-        self.bandwidth = None  # Bandwidth for the target selection
+        self.bandwidth = 2.4e6  # Default bandwidth for detailed scan (2.4 MHz)
         
         # Selected target frequency
         self.selected_frequency = None
         self.selected_x = None
         
-    def set_spectrum_image(self, image, freq_min, freq_max, bandwidth=2.4e6):
+        # Scanning state
+        self.scan_complete = False
+        
+    def set_frequency_range(self, freq_min, freq_max):
         """
-        Set the spectrum scan image and frequency range
+        Set the frequency range for the displayed spectrum
+        
+        Args:
+            freq_min: Minimum frequency in Hz
+            freq_max: Maximum frequency in Hz
+        """
+        self.freq_min = freq_min
+        self.freq_max = freq_max
+        
+    def set_spectrum_image(self, image):
+        """
+        Set the spectrum scan image
         
         Args:
             image: pygame.Surface with the spectrum plot
-            freq_min: Minimum frequency in Hz
-            freq_max: Maximum frequency in Hz
-            bandwidth: Target bandwidth in Hz (default 2.4 MHz for RTL-SDR)
         """
         self.spectrum_image = image
-        self.freq_min = freq_min
-        self.freq_max = freq_max
-        self.bandwidth = bandwidth
+        
+    def set_scan_complete(self, complete):
+        """
+        Mark the scan as complete (enables interactive selection)
+        
+        Args:
+            complete: True if scan is complete, False otherwise
+        """
+        self.scan_complete = complete
         
     def get_frequency_from_x(self, x_pos):
         """
@@ -63,6 +80,10 @@ class LcarsSpectrumScanDisplay(LcarsWidget):
         """
         if self.freq_min is None or self.freq_max is None:
             return None
+        
+        # Account for the plot area (92% of height, leaving 8% for labels at bottom)
+        # The actual plot area goes from y=0 to y=0.92*height
+        # But x-axis is still full width, so no adjustment needed for x
         
         # Calculate ratio along the display
         ratio = float(x_pos) / self.display_width
@@ -92,7 +113,7 @@ class LcarsSpectrumScanDisplay(LcarsWidget):
     
     def set_selected_frequency(self, frequency):
         """
-        Set the selected target frequency for waterfall analysis
+        Set the selected target frequency for detailed analysis
         
         Args:
             frequency: Frequency in Hz
@@ -233,12 +254,29 @@ class LcarsSpectrumScanDisplay(LcarsWidget):
         bg_surface.fill((0, 0, 0))
         surface.blit(bg_surface, bg_rect)
         surface.blit(text, text_rect)
-        
-        # Draw instruction text at bottom
+    
+    def _draw_click_instruction(self, surface):
+        """Draw instruction text when scan is complete"""
+        if not self.scan_complete:
+            return
+            
         instruction_font = pygame.font.Font("assets/swiss911.ttf", 14)
-        instruction = "SELECTED TARGET FOR ANALYZE MODE"
-        text = instruction_font.render(instruction, True, (255, 153, 0))
-        text_rect = text.get_rect(center=(self.display_width // 2, self.display_height - 5))
+        instruction = "CLICK SPECTRUM OR USE SELECTOR ABOVE | SCAN TO RESCAN"
+        text = instruction_font.render(instruction, True, (153, 255, 153))  # Light green
+        text_rect = text.get_rect(center=(self.display_width // 2, 10))
+        
+        # Draw background for text
+        padding = 3
+        bg_rect = pygame.Rect(
+            text_rect.x - padding,
+            text_rect.y - padding,
+            text_rect.width + padding * 2,
+            text_rect.height + padding * 2
+        )
+        bg_surface = pygame.Surface((bg_rect.width, bg_rect.height))
+        bg_surface.set_alpha(180)
+        bg_surface.fill((0, 40, 0))
+        surface.blit(bg_surface, bg_rect)
         surface.blit(text, text_rect)
     
     def update(self, screen):
@@ -253,6 +291,7 @@ class LcarsSpectrumScanDisplay(LcarsWidget):
         self._draw_spectrum(self.image)
         self._draw_frequency_labels(self.image)
         self._draw_selection_indicator(self.image)
+        self._draw_click_instruction(self.image)
         
         # Blit to screen
         screen.blit(self.image, self.rect)
@@ -262,21 +301,29 @@ class LcarsSpectrumScanDisplay(LcarsWidget):
     def handleEvent(self, event, clock):
         """Handle mouse click to select target frequency"""
         if not self.visible:
+            self.focussed = False
             return False
         
         if event.type == pygame.MOUSEBUTTONDOWN:
             if self.rect.collidepoint(event.pos):
-                # Convert to widget-relative coordinates
-                x_rel = event.pos[0] - self.rect.left
+                self.focussed = True
                 
-                # Get frequency from click position
-                frequency = self.get_frequency_from_x(x_rel)
-                if frequency:
-                    self.set_selected_frequency(frequency)
-                    print("Selected target frequency for ANALYZE: {} (bandwidth: {:.1f} MHz)".format(
-                        self._format_frequency(frequency),
-                        self.bandwidth / 1e6
-                    ))
-                    return True
+                # Only allow selection if scan is complete
+                if self.scan_complete:
+                    # Convert to widget-relative coordinates
+                    x_rel = event.pos[0] - self.rect.left
+                    
+                    # Get frequency from click position
+                    frequency = self.get_frequency_from_x(x_rel)
+                    if frequency:
+                        self.set_selected_frequency(frequency)
+                        print("Selected new target frequency: {} (bandwidth: {:.1f} MHz)".format(
+                            self._format_frequency(frequency),
+                            self.bandwidth / 1e6
+                        ))
+                        return True
+        
+        if event.type == pygame.MOUSEBUTTONUP:
+            self.focussed = False
         
         return False
