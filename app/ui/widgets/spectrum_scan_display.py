@@ -165,28 +165,6 @@ class LcarsSpectrumScanDisplay(LcarsWidget):
         scaled_image = pygame.transform.scale(self.spectrum_image, (self.display_width, self.display_height))
         surface.blit(scaled_image, (0, 0))
     
-    def _draw_frequency_labels(self, surface):
-        """Draw frequency labels at bottom"""
-        if self.freq_min is None or self.freq_max is None:
-            return
-        
-        font = pygame.font.Font("assets/swiss911.ttf", 16)
-        
-        # Min frequency (left)
-        text = font.render(self._format_frequency(self.freq_min), True, (255, 153, 0))
-        surface.blit(text, (5, self.display_height - 25))
-        
-        # Center frequency (middle)
-        freq_center = (self.freq_min + self.freq_max) / 2
-        text = font.render(self._format_frequency(freq_center), True, (255, 153, 0))
-        text_rect = text.get_rect(center=(self.display_width // 2, self.display_height - 15))
-        surface.blit(text, text_rect)
-        
-        # Max frequency (right)
-        text = font.render(self._format_frequency(self.freq_max), True, (255, 153, 0))
-        text_rect = text.get_rect(right=self.display_width - 5, top=self.display_height - 25)
-        surface.blit(text, text_rect)
-    
     def _draw_selection_indicator(self, surface):
         """Draw the bandwidth selection indicator"""
         if self.selected_x is None or self.selected_frequency is None:
@@ -226,9 +204,6 @@ class LcarsSpectrumScanDisplay(LcarsWidget):
         # Draw crosshair at top
         crosshair_y = 20
         pygame.draw.line(surface, (255, 255, 0),
-                        (self.selected_x - 10, crosshair_y),
-                        (self.selected_x + 10, crosshair_y), 3)
-        pygame.draw.line(surface, (255, 255, 0),
                         (self.selected_x, crosshair_y - 10),
                         (self.selected_x, crosshair_y + 10), 3)
         
@@ -255,30 +230,6 @@ class LcarsSpectrumScanDisplay(LcarsWidget):
         surface.blit(bg_surface, bg_rect)
         surface.blit(text, text_rect)
     
-    def _draw_click_instruction(self, surface):
-        """Draw instruction text when scan is complete"""
-        if not self.scan_complete:
-            return
-            
-        instruction_font = pygame.font.Font("assets/swiss911.ttf", 14)
-        instruction = "CLICK SPECTRUM OR USE SELECTOR ABOVE | SCAN TO RESCAN"
-        text = instruction_font.render(instruction, True, (153, 255, 153))  # Light green
-        text_rect = text.get_rect(center=(self.display_width // 2, 10))
-        
-        # Draw background for text
-        padding = 3
-        bg_rect = pygame.Rect(
-            text_rect.x - padding,
-            text_rect.y - padding,
-            text_rect.width + padding * 2,
-            text_rect.height + padding * 2
-        )
-        bg_surface = pygame.Surface((bg_rect.width, bg_rect.height))
-        bg_surface.set_alpha(180)
-        bg_surface.fill((0, 40, 0))
-        surface.blit(bg_surface, bg_rect)
-        surface.blit(text, text_rect)
-    
     def update(self, screen):
         """Update and render the spectrum scan display"""
         if not self.visible:
@@ -289,9 +240,7 @@ class LcarsSpectrumScanDisplay(LcarsWidget):
         
         # Draw components
         self._draw_spectrum(self.image)
-        self._draw_frequency_labels(self.image)
         self._draw_selection_indicator(self.image)
-        self._draw_click_instruction(self.image)
         
         # Blit to screen
         screen.blit(self.image, self.rect)
@@ -326,4 +275,4 @@ class LcarsSpectrumScanDisplay(LcarsWidget):
         if event.type == pygame.MOUSEBUTTONUP:
             self.focussed = False
         
-        return False
+        return False 

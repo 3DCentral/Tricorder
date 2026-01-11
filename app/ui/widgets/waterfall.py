@@ -40,6 +40,143 @@ class LcarsWaterfall(LcarsWidget):
         self.selected_frequency = None
         self.selected_x = None
         
+        # Demodulator reference (for bandwidth visualization)
+        self.demodulator = None
+        
+        # NEW: Process management for live scanning
+        self.scan_process = None
+        self.scan_active = False
+        
+        # NEW: Bandwidth control
+        self.bandwidth_options = [
+            200000,   # 200 kHz - Very narrow (single channel)
+            500000,   # 500 kHz
+            1000000,  # 1 MHz
+            1200000,  # 1.2 MHz
+            2400000,  # 2.4 MHz - Default RTL-SDR bandwidth
+            3200000,  # 3.2 MHz - Maximum for stable operation
+        ]
+        self.bandwidth_index = 4  # Start at 2.4 MHz (index 4)
+        self.current_bandwidth = 2400000  # 2.4 MHz default
+        self.center_frequency = None
+    
+    def stop_scan(self):
+        """Stop live waterfall scan"""
+        if self.scan_active and self.scan_process:
+            self.scan_process.terminate()
+            self.scan_process.wait()
+            self.scan_process = None
+        self.scan_active = False
+    
+    def start_scan(self, center_freq, sample_rate=None):
+        """Start live waterfall scan at given frequency
+        
+        Args:
+            center_freq: Center frequency in Hz
+            sample_rate: Sample rate (bandwidth) in Hz, or None to use current_bandwidth
+        """
+        import subprocess
+        import time
+        
+        if sample_rate is None:
+            sample_rate = self.current_bandwidth
+        
+        # Stop any existing scan
+        self.stop_scan()
+        
+        # Give SDR time to close
+        time.sleep(0.3)
+        
+        # Store parameters
+        self.center_frequency = center_freq
+        self.current_bandwidth = sample_rate
+        
+        # Start subprocess
+        self.scan_process = subprocess.Popen(
+            ['python', '/home/tricorder/rpi_lcars-master/rtl_scan_live.py', 
+             str(int(center_freq)), str(int(sample_rate))],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        self.scan_active = True
+        
+        print("Live scan started at {:.3f} MHz with {:.1f} MHz bandwidth".format(
+            center_freq / 1e6, sample_rate / 1e6))
+    
+    def adjust_bandwidth(self, direction):
+        """Increase (1) or decrease (-1) bandwidth and restart scan
+        
+        Args:
+            direction: 1 for increase, -1 for decrease
+        """
+        if not self.scan_active:
+            return
+        
+        # Adjust bandwidth index
+        self.bandwidth_index += direction
+        self.bandwidth_index = max(0, min(len(self.bandwidth_options) - 1, self.bandwidth_index))
+        
+        # Update bandwidth
+        self.current_bandwidth = self.bandwidth_options[self.bandwidth_index]
+        
+        # Use stored center frequency
+        center_freq = self.center_frequency if self.center_frequency else self.selected_frequency
+        if not center_freq:
+            print("No center frequency set")
+            return
+        
+        # Print status
+        print("\n" + "="*60)
+        print("WATERFALL BANDWIDTH ADJUSTMENT")
+        print("="*60)
+        print("New bandwidth: {:.1f} MHz ({:.0f} kHz)".format(
+            self.current_bandwidth / 1e6,
+            self.current_bandwidth / 1000))
+        print("Center frequency: {:.3f} MHz".format(center_freq / 1e6))
+        print("Frequency range: {:.3f} - {:.3f} MHz".format(
+            (center_freq - self.current_bandwidth/2) / 1e6,
+            (center_freq + self.current_bandwidth/2) / 1e6))
+        print("="*60 + "\n")
+        
+        # Restart with new bandwidth
+        self.start_scan(center_freq, self.current_bandwidth)
+    
+    def adjust_frequency(self, direction):
+        """Tune frequency up (1) or down (-1) and restart scan
+        
+        Args:
+            direction: 1 for increase, -1 for decrease
+        """
+        if not self.scan_active:
+            return
+        
+        # Get current center frequency
+        center_freq = self.center_frequency if self.center_frequency else self.selected_frequency
+        if not center_freq:
+            print("No center frequency set")
+            return
+        
+        # Step size is 10% of bandwidth
+        freq_step = self.current_bandwidth * 0.1
+        center_freq += (direction * freq_step)
+        
+        # Clamp to SDR range (24 MHz to 1.766 GHz for RTL-SDR)
+        center_freq = max(24e6, min(1766e6, center_freq))
+        
+        # Print status
+        print("\n" + "="*60)
+        print("WATERFALL FREQUENCY ADJUSTMENT")
+        print("="*60)
+        print("New center frequency: {:.3f} MHz".format(center_freq / 1e6))
+        print("Bandwidth: {:.1f} MHz".format(self.current_bandwidth / 1e6))
+        print("Frequency range: {:.3f} - {:.3f} MHz".format(
+            (center_freq - self.current_bandwidth/2) / 1e6,
+            (center_freq + self.current_bandwidth/2) / 1e6))
+        print("="*60 + "\n")
+        
+        # Restart with new frequency
+        self.start_scan(center_freq, self.current_bandwidth)
+        
     def _generate_colormap(self, num_colors=256):
         """Generate a color map for waterfall display"""
         colormap = []
@@ -130,6 +267,14 @@ class LcarsWaterfall(LcarsWidget):
         freq_max = self.frequencies[-1]
         ratio = (frequency - freq_min) / (freq_max - freq_min)
         self.selected_x = int(ratio * self.display_width)
+    
+    def set_demodulator(self, demodulator):
+        """Set reference to demodulator for bandwidth visualization
+        
+        Args:
+            demodulator: LcarsDemodulator instance
+        """
+        self.demodulator = demodulator
     
     def _normalize_to_color_range(self, data, vmin=-70, vmax=40):
         """
@@ -242,11 +387,47 @@ class LcarsWaterfall(LcarsWidget):
         surface.blit(text, text_rect)
     
     def _draw_frequency_selector(self, surface):
-        """Draw the frequency selection indicator"""
+        """Draw the frequency selection indicator with demodulation bandwidth"""
         if self.selected_x is None or self.selected_frequency is None:
             return
         
-        # Draw vertical line at selected frequency
+        # Get demodulation bandwidth if available
+        demod_bandwidth_hz = None
+        if self.demodulator and self.frequencies is not None:
+            # Get the bandwidth for the selected frequency
+            freq_mhz = self.selected_frequency / 1e6
+            demod_params = self.demodulator.get_demodulation_params(freq_mhz)
+            demod_bandwidth_hz = demod_params.get('bandwidth', None)
+        
+        # Draw bandwidth rectangle if we have the info
+        if demod_bandwidth_hz and self.frequencies is not None:
+            freq_min = self.frequencies[0]
+            freq_max = self.frequencies[-1]
+            freq_range = freq_max - freq_min
+            
+            # Calculate bandwidth in pixels
+            bandwidth_ratio = demod_bandwidth_hz / freq_range
+            bandwidth_pixels = int(bandwidth_ratio * self.display_width)
+            
+            # Calculate left and right edges of bandwidth box
+            x_left = max(0, self.selected_x - bandwidth_pixels // 2)
+            x_right = min(self.display_width, self.selected_x + bandwidth_pixels // 2)
+            box_width = x_right - x_left
+            
+            # Draw semi-transparent bandwidth box
+            box_height = self.display_height - self.psd_height - 40
+            if box_width > 0:
+                # Create semi-transparent overlay
+                bandwidth_surface = pygame.Surface((box_width, box_height))
+                bandwidth_surface.set_alpha(60)  # Very transparent
+                bandwidth_surface.fill((255, 255, 0))  # Yellow tint
+                surface.blit(bandwidth_surface, (x_left, self.psd_height))
+                
+                # Draw border of bandwidth box
+                pygame.draw.rect(surface, (255, 255, 0), 
+                               (x_left, self.psd_height, box_width, box_height), 2)
+        
+        # Draw vertical line at selected frequency (center of bandwidth)
         pygame.draw.line(surface, (255, 255, 0), 
                         (self.selected_x, self.psd_height), 
                         (self.selected_x, self.display_height - 40), 
@@ -261,10 +442,21 @@ class LcarsWaterfall(LcarsWidget):
                         (self.selected_x, crosshair_y - 10),
                         (self.selected_x, crosshair_y + 10), 2)
         
-        # Draw frequency label
+        # Draw frequency label with bandwidth info
         font = pygame.font.Font("assets/swiss911.ttf", 20)
         freq_mhz = self.selected_frequency / 1e6
-        text = font.render("{:.3f} MHz".format(freq_mhz), True, (255, 255, 0))
+        
+        # Include bandwidth in label if available
+        if demod_bandwidth_hz:
+            if demod_bandwidth_hz >= 1000:
+                bw_text = "{:.1f} kHz BW".format(demod_bandwidth_hz / 1000)
+            else:
+                bw_text = "{:.0f} Hz BW".format(demod_bandwidth_hz)
+            label_text = "{:.3f} MHz ({})".format(freq_mhz, bw_text)
+        else:
+            label_text = "{:.3f} MHz".format(freq_mhz)
+        
+        text = font.render(label_text, True, (255, 255, 0))
         text_rect = text.get_rect(center=(self.selected_x, crosshair_y + 30))
         
         # Draw background for text

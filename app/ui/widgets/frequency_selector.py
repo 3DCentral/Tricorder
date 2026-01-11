@@ -132,11 +132,10 @@ class LcarsFrequencySelector(LcarsWidget):
         major_freqs = [
             100, 1e3, 10e3, 100e3, 
             1e6, 10e6, 100e6, 
-            1e9, 2e9
+            1e9
         ]
         
-        font_large = pygame.font.Font("assets/swiss911.ttf", 16)
-        font_small = pygame.font.Font("assets/swiss911.ttf", 12)
+        font_small = pygame.font.Font("assets/swiss911.ttf", 20)
         
         for freq in major_freqs:
             if freq < self.freq_min or freq > self.freq_max:
@@ -146,8 +145,8 @@ class LcarsFrequencySelector(LcarsWidget):
             
             # Draw tick mark
             pygame.draw.line(surface, (255, 255, 0),
-                           (x, y_base - 10),
-                           (x, y_base + 10),
+                           (x, y_base - 20),
+                           (x, y_base + 20),
                            2)
             
             # Draw label
@@ -168,8 +167,8 @@ class LcarsFrequencySelector(LcarsWidget):
             
             x = self.freq_to_x(freq)
             pygame.draw.line(surface, (255, 255, 0),
-                           (x, y_base - 5),
-                           (x, y_base + 5),
+                           (x, y_base - 10),
+                           (x, y_base + 10),
                            1)
     
     def _draw_selection_marker(self, surface):
@@ -224,7 +223,7 @@ class LcarsFrequencySelector(LcarsWidget):
         if width > 0:
             highlight_rect = pygame.Rect(x_start, y_base - 15, width, 30)
             highlight_surface = pygame.Surface((width, 30))
-            highlight_surface.set_alpha(100)
+            highlight_surface.set_alpha(100) 
             highlight_surface.fill((255, 153, 0))  # Orange
             surface.blit(highlight_surface, (x_start, y_base - 15))
     
