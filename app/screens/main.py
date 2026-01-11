@@ -6,6 +6,7 @@ from ui.widgets.lcars_widgets import *
 from ui.widgets.waterfall import LcarsWaterfall
 from ui.widgets.frequency_selector import LcarsFrequencySelector
 from ui.widgets.spectrum_scan_display import LcarsSpectrumScanDisplay
+from ui.widgets.demodulator import LcarsDemodulator
 from ui.widgets.screen import LcarsScreen
 import numpy as np
 from time import sleep
@@ -17,16 +18,10 @@ import glob
 
 class ScreenMain(LcarsScreen):
     def setup(self, all_sprites):
-        all_sprites.add(LcarsBackgroundImage("assets/lcars_screen_i5.png"),
-                        layer=0)
-        all_sprites.add(LcarsText(colours.BLACK, (15, 44), "LCARS 105"),
-                        layer=1)
-        all_sprites.add(LcarsBlockMedium(colours.RED_BROWN, (186, 5), "SCAN", self.scanHandler),
-                        layer=1)
-        all_sprites.add(LcarsBlockSmall(colours.ORANGE, (357, 5), "RECORD", self.recordHandler),
-                        layer=1)
-        all_sprites.add(LcarsBlockLarge(colours.BEIGE, (463, 5), "ANALYZE", self.analyzeHandler),
-                        layer=1)
+        all_sprites.add(LcarsBackgroundImage("assets/lcars_screen_i5.png"), layer=0)
+        all_sprites.add(LcarsBlockMedium(colours.RED_BROWN, (186, 5), "SCAN", self.scanHandler), layer=1)
+        all_sprites.add(LcarsBlockSmall(colours.ORANGE, (357, 5), "RECORD", self.recordHandler), layer=1)
+        all_sprites.add(LcarsBlockLarge(colours.BEIGE, (463, 5), "ANALYZE", self.analyzeHandler), layer=1)
 
         # date display
         self.stardate = LcarsText(colours.BLUE, (12, 888), "STAR DATE", 1.5)
@@ -34,26 +29,19 @@ class ScreenMain(LcarsScreen):
         all_sprites.add(self.stardate, layer=1)
 
         # buttons
-        all_sprites.add(LcarsBlockTop(colours.PEACH, (72, 248), "ATMOSPHERIC", self.weatherHandler),
-                        layer=4)
-                        
+        all_sprites.add(LcarsBlockTop(colours.PEACH, (72, 248), "ATMOSPHERIC", self.weatherHandler), layer=4)  
         self.micro = LcarsMicro(colours.BEIGE, (76, 778), "MICROSCOPE", self.microscopeHandler)
         self.micro.scanning = False
-        all_sprites.add(self.micro,
-                        layer=4)
-        all_sprites.add(LcarsButton(colours.RED_BROWN, (6, 1142), "LOGOUT", self.logoutHandler),
-                        layer=4)
-        all_sprites.add(LcarsBlockTop(colours.PURPLE, (72, 417), "GEOSPATIAL", self.gaugesHandler),
-                        layer=4)
+        all_sprites.add(self.micro, layer=4)
+        all_sprites.add(LcarsButton(colours.RED_BROWN, (6, 1142), "LOGOUT", self.logoutHandler), layer=4)
+        all_sprites.add(LcarsBlockTop(colours.PURPLE, (72, 417), "GEOSPATIAL", self.gaugesHandler), layer=4)
         self.emf = LcarsEMF(colours.PEACH, (72, 587), "EMF", self.emfHandler)
-        all_sprites.add(self.emf,
-                        layer=4)
-        self.emf.scanning = False
+        all_sprites.add(self.emf, layer=4)
         self.spectro = LcarsSpectro(colours.BLUE, (76, 935), "SPECTRAL", self.spectralHandler)
         self.spectro.scanning = False
         self.spectro.analyzing = False
-        all_sprites.add(self.spectro,
-                        layer=4)
+        self.emf.scanning = False
+        all_sprites.add(self.spectro, layer=4)
                         
         # D pad for nagivation
         all_sprites.add(LcarsNav(colours.BLUE,(492,1125),"^", self.navHandlerUp), layer=4)
@@ -114,7 +102,11 @@ class ScreenMain(LcarsScreen):
         self.beep1 = Sound("assets/audio/panel/201.wav")
         Sound("assets/audio/panel/220.wav").play()
         
-        self.tuned_in = False
+        # NEW: FM/AM Demodulator widget (non-visual)
+        self.demodulator = LcarsDemodulator()
+        
+        # Connect demodulator to waterfall for bandwidth visualization
+        self.waterfall_display.set_demodulator(self.demodulator)
         
         # Initialize spectrum checking throttle
         self.last_spectrum_check = 0
@@ -123,24 +115,11 @@ class ScreenMain(LcarsScreen):
         self.scan_animation_frame = 0
         self.last_animation_update = 0
 
-        # Live scan state
-        self.live_scan_process = None
-        self.live_scan_active = False
+        # Live scan state - NOTE: Moved to LcarsWaterfall widget
+        # self.live_scan_process, self.live_scan_active, etc. are now in waterfall_display
         self.last_waterfall_check = 0
         
-        # Waterfall bandwidth adjustment state
-        self.waterfall_bandwidth = 2.4e6  # Default 2.4 MHz for RTL-SDR
-        self.bandwidth_options = [
-            200000,   # 200 kHz - Very narrow (single channel)
-            500000,   # 500 kHz
-            1000000,  # 1 MHz
-            1200000,  # 1.2 MHz
-            2400000,  # 2.4 MHz - Default RTL-SDR bandwidth
-            3200000,  # 3.2 MHz - Maximum for stable operation
-        ]
-        self.bandwidth_index = 4  # Start at 2.4 MHz (index 4)
-        
-        # Track scan frequency range
+        # Track scan frequency range (for spectrum scanning, not waterfall)
         self.current_scan_start_freq = None
         self.current_scan_end_freq = None
 
@@ -222,7 +201,7 @@ class ScreenMain(LcarsScreen):
                 self._draw_scanning_animation(screenSurface)
         
         # LIVE WATERFALL UPDATES
-        if self.waterfall_display.visible and self.live_scan_active:
+        if self.waterfall_display.scan_active:  # ONLY when actually scanning!
             # Check for new waterfall data every 100ms
             current_time = pygame.time.get_ticks()
             if current_time - self.last_waterfall_check > 100:
@@ -245,18 +224,17 @@ class ScreenMain(LcarsScreen):
     def _draw_scanning_animation(self, screen):
         """Draw a scanning animation indicator above the spectrum display"""
         dots = [".", "..", "...", "....", ".....", "......", ".......", "........", "........."]
-        scan_text = "SCANNING" + dots[self.scan_animation_frame]
+        scan_text = "....." + dots[self.scan_animation_frame]
 
         font = pygame.font.Font("assets/swiss911.ttf", 20)
         text_surface = font.render(scan_text, True, (255, 255, 0))
-        text_rect = text_surface.get_rect(center=(507, 315))
+        text_rect = text_surface.get_rect(center=(607, 155))
         
-        padding = 10
         bg_rect = pygame.Rect(
-            text_rect.x - padding,
-            text_rect.y - padding,
-            text_rect.width + padding * 2,
-            text_rect.height + padding * 2
+            text_rect.x - 10,
+            text_rect.y - 10,
+            text_rect.width + 10 * 2,
+            text_rect.height + 10 * 2
         )
         bg_surface = pygame.Surface((bg_rect.width, bg_rect.height))
         bg_surface.set_alpha(180)
@@ -266,235 +244,23 @@ class ScreenMain(LcarsScreen):
     
     def _stop_live_scan(self):
         """Stop the live waterfall scan process"""
-        if self.live_scan_active and self.live_scan_process:
-            print("Stopping live scan process...")
-            self.live_scan_process.terminate()
-            self.live_scan_process.wait()
-            self.live_scan_process = None
-        self.live_scan_active = False
+        self.waterfall_display.stop_scan()
     
     def _stop_fm_demodulation(self):
         """Stop FM demodulation if active"""
-        if self.tuned_in:
-            try:
-                os.killpg(os.getpgid(self.fm_pid), signal.SIGTERM)
-                print("Stopped FM demodulation")
-            except (OSError, ProcessLookupError, AttributeError) as e:
-                print("FM demodulation already stopped")
-            self.tuned_in = False
+        self.demodulator.stop_demodulation()
     
     def _adjust_waterfall_bandwidth(self, direction):
-        """
-        Adjust waterfall bandwidth and restart live scan
-        
-        Args:
-            direction: 1 for increase, -1 for decrease
-        """
-        if not self.live_scan_active:
-            return
-        
-        # Adjust bandwidth index
-        self.bandwidth_index += direction
-        self.bandwidth_index = max(0, min(len(self.bandwidth_options) - 1, self.bandwidth_index))
-        
-        # Update bandwidth
-        self.waterfall_bandwidth = self.bandwidth_options[self.bandwidth_index]
-        
-        # Get current center frequency
-        if hasattr(self, 'live_scan_center_freq'):
-            center_freq = self.live_scan_center_freq
-        else:
-            center_freq = self.waterfall_display.selected_frequency if self.waterfall_display.selected_frequency else 100e6
-        
-        print("\n" + "="*60)
-        print("WATERFALL BANDWIDTH ADJUSTMENT")
-        print("="*60)
-        print("New bandwidth: {:.1f} MHz ({:.0f} kHz)".format(
-            self.waterfall_bandwidth / 1e6,
-            self.waterfall_bandwidth / 1000))
-        print("Center frequency: {:.3f} MHz".format(center_freq / 1e6))
-        print("Frequency range: {:.3f} - {:.3f} MHz".format(
-            (center_freq - self.waterfall_bandwidth/2) / 1e6,
-            (center_freq + self.waterfall_bandwidth/2) / 1e6))
-        print("="*60 + "\n")
-        
-        # Restart live scan with new bandwidth
-        self._restart_live_scan(center_freq, self.waterfall_bandwidth)
+        """Adjust waterfall bandwidth and restart live scan"""
+        self.waterfall_display.adjust_bandwidth(direction)
     
     def _adjust_waterfall_frequency(self, direction):
-        """
-        Adjust waterfall center frequency
-        
-        Args:
-            direction: 1 for increase, -1 for decrease
-        """
-        if not self.live_scan_active:
-            return
-        
-        # Get current center frequency
-        if hasattr(self, 'live_scan_center_freq'):
-            center_freq = self.live_scan_center_freq
-        else:
-            center_freq = self.waterfall_display.selected_frequency if self.waterfall_display.selected_frequency else 100e6
-        
-        # Adjust frequency by 10% of bandwidth (allows fine tuning)
-        freq_step = self.waterfall_bandwidth * 0.1
-        center_freq += (direction * freq_step)
-        
-        # Clamp to valid SDR range (24 MHz to 1.766 GHz for RTL-SDR)
-        center_freq = max(24e6, min(1766e6, center_freq))
-        
-        print("\n" + "="*60)
-        print("WATERFALL FREQUENCY ADJUSTMENT")
-        print("="*60)
-        print("New center frequency: {:.3f} MHz".format(center_freq / 1e6))
-        print("Bandwidth: {:.1f} MHz".format(self.waterfall_bandwidth / 1e6))
-        print("Frequency range: {:.3f} - {:.3f} MHz".format(
-            (center_freq - self.waterfall_bandwidth/2) / 1e6,
-            (center_freq + self.waterfall_bandwidth/2) / 1e6))
-        print("="*60 + "\n")
-        
-        # Restart live scan with new center frequency
-        self._restart_live_scan(center_freq, self.waterfall_bandwidth)
+        """Adjust waterfall center frequency"""
+        self.waterfall_display.adjust_frequency(direction)
     
     def _restart_live_scan(self, center_freq, sample_rate):
-        """
-        Restart live waterfall scan with new parameters
-        
-        Args:
-            center_freq: Center frequency in Hz
-            sample_rate: Sample rate (bandwidth) in Hz
-        """
-        # Stop current scan
-        if self.live_scan_process:
-            self.live_scan_process.terminate()
-            self.live_scan_process.wait()
-        
-        # Give SDR time to close
-        import time
-        time.sleep(0.3)
-        
-        # Store current parameters
-        self.live_scan_center_freq = center_freq
-        self.waterfall_bandwidth = sample_rate
-        
-        # Start new scan
-        self.live_scan_process = subprocess.Popen(
-            ['python', '/home/tricorder/rpi_lcars-master/rtl_scan_live.py', 
-             str(int(center_freq)), str(int(sample_rate))],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        self.live_scan_active = True
-        
-        print("Live scan restarted at {:.3f} MHz with {:.1f} MHz bandwidth".format(
-            center_freq / 1e6, sample_rate / 1e6))
-    
-    def _get_demodulation_params(self, freq_mhz):
-        """
-        Determine optimal demodulation parameters based on frequency
-        
-        Args:
-            freq_mhz: Frequency in MHz
-            
-        Returns:
-            Dictionary with mode, sample_rate, bandwidth, and mode_name
-        """
-        # Weather Radio (NOAA): 162.400 - 162.550 MHz
-        # Uses narrow-band FM (NBFM) with 12.5 kHz deviation
-        if 162.0 <= freq_mhz <= 163.0:
-            return {
-                'mode': 'fm',           # Narrow-band FM
-                'sample_rate': 16000,   # 16 kHz sample rate (increased for better capture)
-                'bandwidth': 16000,     # 16 kHz bandwidth
-                'gain': 40,             # Specific gain for weak signals
-                'squelch': 0,           # No squelch initially (hear everything)
-                'mode_name': 'NBFM (Weather Radio)'
-            }
-        
-        # Marine VHF: 156-162 MHz
-        # Uses narrow-band FM with 12.5 kHz deviation
-        elif 156.0 <= freq_mhz <= 162.0:
-            return {
-                'mode': 'fm',
-                'sample_rate': 12000,
-                'bandwidth': 12500,
-                'gain': None,           # Auto gain
-                'squelch': 0,
-                'mode_name': 'NBFM (Marine VHF)'
-            }
-        
-        # Aviation: 118-137 MHz
-        # Uses AM (Amplitude Modulation)
-        elif 118.0 <= freq_mhz <= 137.0:
-            return {
-                'mode': 'am',
-                'sample_rate': 12000,
-                'bandwidth': 10000,     # 10 kHz for AM aviation
-                'gain': None,
-                'squelch': 0,
-                'mode_name': 'AM (Aviation)'
-            }
-        
-        # 2-meter Ham Radio: 144-148 MHz
-        # Uses narrow-band FM with 12.5 kHz or 25 kHz deviation
-        elif 144.0 <= freq_mhz <= 148.0:
-            return {
-                'mode': 'fm',
-                'sample_rate': 16000,   # Slightly wider for ham
-                'bandwidth': 16000,
-                'gain': None,
-                'squelch': 0,
-                'mode_name': 'NBFM (2m Ham)'
-            }
-        
-        # Commercial FM Broadcast: 88-108 MHz
-        # Uses wide-band FM with 75 kHz deviation
-        elif 88.0 <= freq_mhz <= 108.0:
-            return {
-                'mode': 'wbfm',         # Wide-band FM
-                'sample_rate': 200000,  # 200 kHz sample rate
-                'bandwidth': 200000,
-                'gain': None,
-                'squelch': 0,
-                'mode_name': 'WBFM (FM Broadcast)'
-            }
-        
-        # PMR446 / FRS / GMRS: 446-467 MHz
-        # Uses narrow-band FM
-        elif 446.0 <= freq_mhz <= 467.0:
-            return {
-                'mode': 'fm',
-                'sample_rate': 12000,
-                'bandwidth': 12500,
-                'gain': None,
-                'squelch': 0,
-                'mode_name': 'NBFM (PMR/FRS/GMRS)'
-            }
-        
-        # 70cm Ham Radio: 420-450 MHz
-        # Uses narrow-band FM
-        elif 420.0 <= freq_mhz <= 450.0:
-            return {
-                'mode': 'fm',
-                'sample_rate': 16000,
-                'bandwidth': 16000,
-                'gain': None,
-                'squelch': 0,
-                'mode_name': 'NBFM (70cm Ham)'
-            }
-        
-        # Default: Use narrow-band FM for most applications
-        # This is a safe default for unknown frequencies
-        else:
-            return {
-                'mode': 'fm',
-                'sample_rate': 12000,
-                'bandwidth': 12500,
-                'gain': None,
-                'squelch': 0,
-                'mode_name': 'NBFM (Default)'
-            }
+        """Restart live waterfall scan with new parameters"""
+        self.waterfall_display.start_scan(center_freq, sample_rate)
     
     def _stop_all_cameras(self):
         """Stop all camera scanning"""
@@ -708,12 +474,12 @@ class ScreenMain(LcarsScreen):
                 return
                 
             # Stop live scan process if running (must close SDR before demodulation)
-            if self.live_scan_active:
+            if self.waterfall_display.scan_active:
                 print("Stopping live scan to free SDR for FM demodulation...")
                 self._stop_live_scan()
+                self.waterfall_display.scan_active = False
                 # Give the SDR a moment to fully close
-                import time
-                time.sleep(0.5)
+                sleep(0.5)
                 
         elif self.spectrum_scan_display.visible and self.spectrum_scan_display.scan_complete:
             # Use spectrum scan display's selected frequency
@@ -724,93 +490,29 @@ class ScreenMain(LcarsScreen):
         
         # If we have a target frequency, toggle FM demodulation
         if target_freq is not None:
-            if self.tuned_in:
+            if self.demodulator.is_active():
                 # Stop current demodulation
                 self._stop_fm_demodulation()
                 
                 # If waterfall display is visible, offer to restart the scan
-                if self.waterfall_display.visible and not self.live_scan_active:
+                if self.waterfall_display.visible and not self.waterfall_display.scan_active:
                     print("Restarting live waterfall scan...")
                     # Give the SDR a moment to fully close
-                    import time
-                    time.sleep(0.5)
+                    sleep(0.5)
                     
-                    # Restart live scan at the same frequency
+                    # Restart live scan at the same frequency using widget method
                     target_freq_hz = int(target_freq * 1e6)
-                    self.live_scan_process = subprocess.Popen(
-                        ['python', '/home/tricorder/rpi_lcars-master/rtl_scan_live.py', str(target_freq_hz)],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE
-                    )
-                    self.live_scan_active = True
+                    self.waterfall_display.start_scan(target_freq_hz)
                     print("Live waterfall scan restarted at {:.3f} MHz".format(target_freq))
             else:
-                # Start FM demodulation with automatic parameter selection
-                target_freq_mhz = target_freq
+                # Start FM demodulation using widget
+                target_freq_hz = int(target_freq * 1e6)
+                self.demodulator.start_demodulation(target_freq_hz)
                 
-                # Determine demodulation parameters based on frequency
-                demod_params = self._get_demodulation_params(target_freq_mhz)
-                
-                print("Tuning {} demodulation to {:.3f} MHz...".format(
-                    demod_params['mode_name'], target_freq_mhz))
-                print("  Mode: {} | Bandwidth: {} kHz | Sample rate: {} kHz".format(
-                    demod_params['mode'],
-                    demod_params['bandwidth'] / 1000,
-                    demod_params['sample_rate'] / 1000))
-                
-                # Build rtl_fm command with appropriate parameters
-                # Base command
-                cmd_parts = [
-                    'rtl_fm',
-                    '-f {}e6'.format(target_freq_mhz),
-                    '-M {}'.format(demod_params['mode']),
-                    '-s {}'.format(int(demod_params['sample_rate'])),
-                ]
-                
-                # Add gain if specified
-                if demod_params.get('gain') is not None:
-                    cmd_parts.append('-g {}'.format(demod_params['gain']))
-                    print("  Gain: {} dB".format(demod_params['gain']))
-                else:
-                    print("  Gain: Auto")
-                
-                # Add squelch if specified
-                if demod_params.get('squelch', 0) > 0:
-                    cmd_parts.append('-l {}'.format(demod_params['squelch']))
-                    print("  Squelch: {}".format(demod_params['squelch']))
-                
-                # Add frequency correction (adjust if needed for your hardware)
-                cmd_parts.append('-p 0')  # PPM correction (0 = no correction)
-                
-                # Resample and pipe to audio
-                cmd_parts.extend([
-                    '-r 48000',  # Resample to 48kHz
-                    '-',
-                    '|',
-                    'play -t raw -r 48k -es -b 16 -c 1 -V1 -'
-                ])
-                
-                # Build full command
-                cmd = ' '.join(cmd_parts) + ' 2>&1'  # Capture stderr too
-                
-                print("  Full command: {}".format(cmd))
-                
-                try:
-                    process = subprocess.Popen(['bash', '-c', cmd], 
-                                             preexec_fn=os.setsid,
-                                             stdout=subprocess.PIPE,
-                                             stderr=subprocess.STDOUT)
-                    self.fm_pid = process.pid
-                    self.tuned_in = True
-                    print("Demodulation started (PID: {})".format(self.fm_pid))
-                    
-                    # If waterfall was running, inform user
-                    if self.waterfall_display.visible:
-                        print("Live waterfall paused during demodulation")
-                        print("Click RECORD again to stop and restart waterfall")
-                except Exception as e:
-                    print("Failed to start demodulation: {}".format(e))
-                    self.tuned_in = False        
+                # If waterfall was running, inform user
+                if self.waterfall_display.visible:
+                    print("Live waterfall paused during demodulation")
+                    print("Click RECORD again to stop and restart waterfall")        
         
             
     def analyzeHandler(self, item, event, clock):
@@ -855,16 +557,10 @@ class ScreenMain(LcarsScreen):
             self.spectrum_scan_display.visible = False
             self.emf_gadget.visible = False
             
-            if not self.live_scan_active:
-                # Start live scan
-                target_freq_mhz = target_freq / 1e6
-                print("Starting live waterfall at {:.3f} MHz...".format(target_freq_mhz))
-                self.live_scan_process = subprocess.Popen(
-                    ['python', '/home/tricorder/rpi_lcars-master/rtl_scan_live.py', str(int(target_freq))],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                self.live_scan_active = True
+            if not self.waterfall_display.scan_active:
+                # Start live scan using widget method
+                print("Starting live waterfall at {:.3f} MHz...".format(target_freq / 1e6))
+                self.waterfall_display.start_scan(target_freq)
                 self.waterfall_display.visible = True
                 self.waterfall_display.set_selected_frequency(target_freq)
             else:
@@ -879,7 +575,7 @@ class ScreenMain(LcarsScreen):
     # Navigation handlers - consolidated
     def navHandlerUp(self, item, event, clock):
         # If waterfall active, increase bandwidth
-        if self.waterfall_display.visible and self.live_scan_active:
+        if self.waterfall_display.visible and self.waterfall_display.scan_active:
             self._adjust_waterfall_bandwidth(1)  # Increase
             return
         
@@ -888,7 +584,7 @@ class ScreenMain(LcarsScreen):
             
     def navHandlerDown(self, item, event, clock):
         # If waterfall active, decrease bandwidth
-        if self.waterfall_display.visible and self.live_scan_active:
+        if self.waterfall_display.visible and self.waterfall_display.scan_active:
             self._adjust_waterfall_bandwidth(-1)  # Decrease
             return
         
@@ -897,7 +593,7 @@ class ScreenMain(LcarsScreen):
                        
     def navHandlerLeft(self, item, event, clock):
         # If waterfall active, decrease frequency
-        if self.waterfall_display.visible and self.live_scan_active:
+        if self.waterfall_display.visible and self.waterfall_display.scan_active:
             self._adjust_waterfall_frequency(-1)  # Decrease
             return
         
@@ -908,7 +604,7 @@ class ScreenMain(LcarsScreen):
                           
     def navHandlerRight(self, item, event, clock):
         # If waterfall active, increase frequency
-        if self.waterfall_display.visible and self.live_scan_active:
+        if self.waterfall_display.visible and self.waterfall_display.scan_active:
             self._adjust_waterfall_frequency(1)  # Increase
             return
         
