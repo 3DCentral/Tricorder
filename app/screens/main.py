@@ -8,6 +8,7 @@ from ui.widgets.frequency_selector import LcarsFrequencySelector
 from ui.widgets.spectrum_scan_display import LcarsSpectrumScanDisplay
 from ui.widgets.demodulator import LcarsDemodulator
 from ui.widgets.text_display import LcarsTextDisplay
+from ui.widgets.topo_map import LcarsTopoMap
 from ui.widgets.screen import LcarsScreen
 import numpy as np
 from time import sleep
@@ -45,7 +46,7 @@ class ScreenMain(LcarsScreen):
         self.emf.scanning = False
         all_sprites.add(self.spectro, layer=4)
                         
-        # D pad for nagivation
+        # D pad for navigation
         all_sprites.add(LcarsNav(colours.BLUE,(492,1125),"^", self.navHandlerUp), layer=4)
         all_sprites.add(LcarsNav(colours.BLUE,(634,1125),"v", self.navHandlerDown), layer=4)
         all_sprites.add(LcarsNav(colours.BLUE,(560,1055),"<", self.navHandlerLeft), layer=4)
@@ -67,15 +68,24 @@ class ScreenMain(LcarsScreen):
         # Position: y=135, x=1055, size 215x215
         self.microscope_file_list = LcarsTextDisplay((135, 1055), (215, 215), font_size=16)
         self.microscope_file_list.visible = True  # Always visible
-        # No placeholder text - will be populated when files are available
         all_sprites.add(self.microscope_file_list, layer=4)
 
+        # OLD dashboard (static images) - keeping for fallback
         self.dashboard = LcarsImage("assets/geo.png", (187, 299))
         self.dashboard_ref = LcarsImage("assets/geo_ref.png", (187, 299))
         self.dashboard.visible = False
         self.dashboard_ref.visible = False
         all_sprites.add(self.dashboard, layer=2)
         all_sprites.add(self.dashboard_ref, layer=2)
+
+        # NEW: Topographical map widget for Geospatial mode
+        # DON'T load DEM on startup - only when mode is activated (lazy loading)
+        self.topo_map = LcarsTopoMap((187, 299), (640, 480), dem_file_path=None)
+        self.topo_map.visible = False
+        all_sprites.add(self.topo_map, layer=2)
+        
+        # Store DEM file path for lazy loading
+        self.dem_file_path = "assets/usgs/USGS_13_n38w078_20211220.tif"
 
         self.weather = LcarsImage("assets/atmosph.png", (187, 299))
         self.weather.visible = False
@@ -99,20 +109,18 @@ class ScreenMain(LcarsScreen):
         self.frequency_selector.visible = False
         all_sprites.add(self.frequency_selector, layer=2)
         
-        # NEW: Interactive spectrum scan display for SCAN mode (bottom 70%, below frequency selector)
-        # Position: 187 + 144 = 331 from top, size: 640x336
+        # Interactive spectrum scan display for SCAN mode (bottom 70%)
         self.spectrum_scan_display = LcarsSpectrumScanDisplay((331, 299), (640, 336))
         self.spectrum_scan_display.visible = False
         all_sprites.add(self.spectrum_scan_display, layer=2)
         
-        # Dimensions for the scan display area (70% of 480 = 336)
+        # Dimensions for the scan display area
         self.scan_display_size = (640, 336)
 
-        #all_sprites.add(LcarsMoveToMouse(colours.WHITE), layer=1)
         self.beep1 = Sound("assets/audio/panel/201.wav")
         Sound("assets/audio/panel/220.wav").play()
         
-        # NEW: FM/AM Demodulator widget (non-visual)
+        # FM/AM Demodulator widget (non-visual)
         self.demodulator = LcarsDemodulator()
         
         # Connect demodulator to waterfall for bandwidth visualization
@@ -125,13 +133,15 @@ class ScreenMain(LcarsScreen):
         self.scan_animation_frame = 0
         self.last_animation_update = 0
 
-        # Live scan state - NOTE: Moved to LcarsWaterfall widget
-        # self.live_scan_process, self.live_scan_active, etc. are now in waterfall_display
+        # Live scan state
         self.last_waterfall_check = 0
         
-        # Track scan frequency range (for spectrum scanning, not waterfall)
+        # Track scan frequency range
         self.current_scan_start_freq = None
         self.current_scan_end_freq = None
+        
+        # Topographical map pan speed
+        self.topo_pan_speed = 15
 
     def update(self, screenSurface, fpsClock):
         if pygame.time.get_ticks() - self.lastClockUpdate > 1000:
@@ -152,19 +162,14 @@ class ScreenMain(LcarsScreen):
             if hasattr(self.emf, 'scan_process'):
                 poll_result = self.emf.scan_process.poll()
                 if poll_result is not None:
-                    # Process has finished
                     print("Scan process completed with code: {}".format(poll_result))
                     self.emf.scanning = False
                     self.emf_gadget.emf_scanning = False
-                    # Clear scanning highlight on frequency selector
                     self.frequency_selector.clear_scanning_range()
-                    # Load the final spectrum image
                     try:
                         loaded_image = pygame.image.load("/home/tricorder/rpi_lcars-master/spectrum.png")
-                        # Scale to fit the scan display area (640x336)
                         scaled_image = pygame.transform.scale(loaded_image, self.scan_display_size)
                         self.emf.spectrum_image = scaled_image
-                        # Update the interactive display
                         self.spectrum_scan_display.set_spectrum_image(scaled_image)
                         self.spectrum_scan_display.set_scan_complete(True)
                         print("Scan complete! Click on spectrum to select new target frequency.")
@@ -173,60 +178,47 @@ class ScreenMain(LcarsScreen):
             
             # Update scanning animation only if still scanning
             if self.emf.scanning:
-                if current_time - self.last_animation_update > 200:  # Update every 200ms
+                if current_time - self.last_animation_update > 200:
                     self.last_animation_update = current_time
                     self.scan_animation_frame = (self.scan_animation_frame + 1) % 4
                 
-                # Only check for new spectrum files every 500ms to reduce disk I/O
                 if current_time - self.last_spectrum_check > 500:
                     self.last_spectrum_check = current_time
                     try:
-                        # Find all progress files
                         progress_files = glob.glob("/home/tricorder/rpi_lcars-master/spectrum_progress_*.png")
                         
                         if progress_files:
-                            # Get the most recent one
                             latest_file = max(progress_files, key=os.path.getmtime)
                             
-                            # Only reload if it's a new file
                             if not hasattr(self.emf, 'last_spectrum_file') or latest_file != self.emf.last_spectrum_file:
-                                # Try to load it
                                 loaded_image = pygame.image.load(latest_file)
-                                # Scale to fit scan display
                                 scaled_image = pygame.transform.scale(loaded_image, self.scan_display_size)
                                 self.spectrum_scan_display.set_spectrum_image(scaled_image)
                                 self.emf.spectrum_image = loaded_image
                                 self.emf.last_spectrum_file = latest_file
                                 print("Loaded spectrum update: {}".format(latest_file))
                         else:
-                            # Fallback to main spectrum.png if no progress files exist yet
                             if os.path.exists("/home/tricorder/rpi_lcars-master/spectrum.png"):
                                 self.emf.spectrum_image = pygame.image.load("/home/tricorder/rpi_lcars-master/spectrum.png")
                                 
                     except (pygame.error, IOError, OSError) as e:
-                        # File is still being written or other IO issue, skip this frame
                         pass
                 
-                # Draw scanning animation overlay
                 self._draw_scanning_animation(screenSurface)
         
         # LIVE WATERFALL UPDATES
-        if self.waterfall_display.scan_active:  # ONLY when actually scanning!
-            # Check for new waterfall data every 100ms
+        if self.waterfall_display.scan_active:
             current_time = pygame.time.get_ticks()
             if current_time - self.last_waterfall_check > 100:
                 self.last_waterfall_check = current_time
                 try:
-                    # Load waterfall data files
                     waterfall_data = np.load("/home/tricorder/rpi_lcars-master/spectrum_live_waterfall.npy")
                     psd_data = np.load("/home/tricorder/rpi_lcars-master/spectrum_live_psd.npy")
                     frequencies = np.load("/home/tricorder/rpi_lcars-master/spectrum_live_frequencies.npy")
                     
-                    # Update waterfall display
                     self.waterfall_display.set_data(waterfall_data, psd_data, frequencies)
                     
                 except (IOError, OSError):
-                    # Files not ready yet, skip this frame
                     pass
         
         self.myScreen = screenSurface
@@ -287,23 +279,19 @@ class ScreenMain(LcarsScreen):
         self.microscope_gadget.visible = False
         self.spectral_gadget.visible = False
         self.dashboard.visible = False
+        self.topo_map.visible = False  # NEW: Hide topo map
         self.weather.visible = False
         self.waterfall_display.visible = False
         self.frequency_selector.visible = False
         self.spectrum_scan_display.visible = False
         self.microscope_gadget_ref.visible = False
         self.dashboard_ref.visible = False
-        # Note: microscope_file_list stays visible
     
     def _switch_to_mode(self, gadget_name):
-        """Switch to a specific gadget mode
-        
-        Args:
-            gadget_name: One of 'emf', 'microscope', 'spectral', 'dashboard', 'weather'
-        """
+        """Switch to a specific gadget mode"""
         self._stop_all_cameras()
         self._stop_live_scan()
-        self._stop_fm_demodulation()  # Stop FM when switching modes
+        self._stop_fm_demodulation()
         self._hide_all_gadgets()
         
         # Show the requested gadget
@@ -314,7 +302,8 @@ class ScreenMain(LcarsScreen):
         elif gadget_name == 'spectral':
             self.spectral_gadget.visible = True
         elif gadget_name == 'dashboard':
-            self.dashboard.visible = True
+            # Use new topo map instead of static image
+            self.topo_map.visible = True
         elif gadget_name == 'weather':
             self.weather.visible = True
         
@@ -327,45 +316,35 @@ class ScreenMain(LcarsScreen):
             
             # Check if click is on waterfall display
             if self.waterfall_display.visible and self.waterfall_display.rect.collidepoint(event.pos):
-                # Convert screen coordinates to widget-relative coordinates
                 x_rel = event.pos[0] - self.waterfall_display.rect.left
                 y_rel = event.pos[1] - self.waterfall_display.rect.top
                 
-                # Get frequency from X position
                 frequency = self.waterfall_display.get_frequency_from_x(x_rel)
                 if frequency:
                     self.waterfall_display.set_selected_frequency(frequency)
-                    self.emf_gadget.target_frequency = frequency / 1e6  # Convert to MHz
+                    self.emf_gadget.target_frequency = frequency / 1e6
                     print("Selected frequency: {:.3f} MHz".format(frequency / 1e6))
                     
-                    # Update demodulation info display
                     self._updateDemodulationInfo(frequency)
             
             # Check if click is on spectrum scan display
             if self.spectrum_scan_display.visible and self.spectrum_scan_display.rect.collidepoint(event.pos):
-                # When user clicks on spectrum, update demod info
                 if self.spectrum_scan_display.selected_frequency:
                     self._updateDemodulationInfo(self.spectrum_scan_display.selected_frequency)
             
             # Check if click is on frequency selector
             if self.frequency_selector.visible and self.frequency_selector.rect.collidepoint(event.pos):
-                # When user clicks on frequency selector, update demod info
                 if hasattr(self.frequency_selector, 'selected_frequency') and self.frequency_selector.selected_frequency:
                     self._updateDemodulationInfo(self.frequency_selector.selected_frequency)
             
             # Check if click is on microscope file list
             if self.microscope_file_list.visible and self.microscope_file_list.rect.collidepoint(event.pos):
-                # The file list widget handles the click and updates selected_index internally
-                # After it processes the event, sync our state and load the image
-                old_index = self.micro.reviewing
-                # Let the widget process the event first
-                pass  # Widget will handle in its own handleEvent
+                pass
 
         if event.type == pygame.MOUSEBUTTONUP:
             # Check if file list selection changed after click
             if self.microscope_file_list.visible and self.microscope_file_list.selected_index is not None:
                 if self.microscope_file_list.selected_index != self.micro.reviewing:
-                    # Selection changed via click, update our index and load image
                     self.micro.reviewing = self.microscope_file_list.selected_index
                     self._loadMicroscopeImage()
             return False
@@ -388,21 +367,17 @@ class ScreenMain(LcarsScreen):
             ))
     
     def _updateDemodulationInfo(self, frequency_hz):
-        """Update text display with demodulation protocol info for given frequency
-        
-        Args:
-            frequency_hz: Target frequency in Hz (or None)
-        """
-        # Delegate to demodulator widget to get formatted lines
+        """Update text display with demodulation protocol info"""
         lines = self.demodulator.get_demodulation_info(frequency_hz)
         self.microscope_file_list.set_lines(lines)
             
     def scanHandler(self, item, event, clock):
         """SCAN: Start wide spectrum survey with frequency selection"""
         
-        if self.dashboard.visible:
-            self.dashboard.visible = False
-            self.dashboard_ref.visible = True
+        if self.dashboard.visible or self.topo_map.visible:
+            # In geospatial mode, SCAN button does nothing (or could trigger GPS update)
+            print("SCAN: GPS position update (not implemented yet)")
+            return
             
         if self.microscope_gadget.visible:
             if not self.micro.scanning:
@@ -418,42 +393,35 @@ class ScreenMain(LcarsScreen):
         if self.waterfall_display.visible:
             self.waterfall_display.visible = False
             self.frequency_selector.visible = True
-            # If we have a completed scan, show it; otherwise hide it
             if self.spectrum_scan_display.scan_complete:
                 self.spectrum_scan_display.visible = True
-                print("Scan results restored - Click on spectrum/selector to choose new target, then ANALYZE or SCAN")
+                print("Scan results restored")
                 return
             else:
                 self.spectrum_scan_display.visible = False
             
         # EMF mode: Show frequency selector and handle scanning
         if self.emf_gadget.visible or self.frequency_selector.visible or self.spectrum_scan_display.visible:
-            # If showing completed scan, reset to start new scan
             if self.spectrum_scan_display.visible and self.spectrum_scan_display.scan_complete:
-                # Get the selected frequency from the spectrum display (if any)
                 if self.spectrum_scan_display.selected_frequency:
                     self.frequency_selector.set_selected_frequency(self.spectrum_scan_display.selected_frequency)
                 
-                # Reset spectrum display but keep both widgets visible
                 self.spectrum_scan_display.set_scan_complete(False)
                 self.spectrum_scan_display.clear_selection()
                 self.emf_gadget.visible = False
                 self.frequency_selector.visible = True
                 self.spectrum_scan_display.visible = True
-                print("Select a new target frequency (frequency selector or spectrum), then click SCAN again")
+                print("Select a new target frequency")
                 return
             
-            # First time: Show frequency selector
             if self.emf_gadget.visible:
                 self.emf_gadget.visible = False
                 self.frequency_selector.visible = True
                 self.spectrum_scan_display.visible = False
-                print("Select a target frequency on the scale above, then click SCAN again")
+                print("Select a target frequency on the scale above")
                 return
             
-            # Subsequent clicks: Start scan if frequency selected
             if self.frequency_selector.visible or self.spectrum_scan_display.visible:
-                # Priority: use spectrum display selection if available, otherwise frequency selector
                 target_freq = None
                 if self.spectrum_scan_display.visible and self.spectrum_scan_display.selected_frequency:
                     target_freq = self.spectrum_scan_display.selected_frequency
@@ -461,18 +429,16 @@ class ScreenMain(LcarsScreen):
                     target_freq = self.frequency_selector.selected_frequency
                 
                 if target_freq is None:
-                    print("Please select a target frequency first (click on frequency selector or spectrum)")
+                    print("Please select a target frequency first")
                     return
-                bandwidth = 20e6  # 20 MHz bandwidth for now
+                bandwidth = 20e6
                 
                 start_freq = int(target_freq - bandwidth / 2)
                 end_freq = int(target_freq + bandwidth / 2)
                 
-                # Ensure frequencies are within valid range
-                start_freq = max(int(50e6), start_freq)  # RTL-SDR typically starts at ~50 MHz
+                start_freq = max(int(50e6), start_freq)
                 end_freq = min(int(2.2e9), end_freq)
                 
-                # Store frequency range for the interactive display
                 self.current_scan_start_freq = start_freq
                 self.current_scan_end_freq = end_freq
                 
@@ -484,23 +450,18 @@ class ScreenMain(LcarsScreen):
                 self.emf.scanning = True
                 self.emf_gadget.emf_scanning = True
                 
-                # Reset spectrum file tracking
                 if hasattr(self.emf, 'last_spectrum_file'):
                     delattr(self.emf, 'last_spectrum_file')
                 
-                # Highlight the scanning range on the selector
                 self.frequency_selector.set_scanning_range(start_freq, end_freq)
                 
-                # Show spectrum scan display AND keep frequency selector visible
                 self.frequency_selector.visible = True
                 self.spectrum_scan_display.visible = True
                 self.spectrum_scan_display.set_scan_complete(False)
                 self.spectrum_scan_display.clear_selection()
                 
-                # Set frequency range for the display
                 self.spectrum_scan_display.set_frequency_range(start_freq, end_freq)
                 
-                # Start multi-frequency scan process
                 self.emf.scan_process = subprocess.Popen(
                     ['python', '/home/tricorder/rpi_lcars-master/rtl_scan_2.py', 
                      str(start_freq), str(end_freq)],
@@ -508,12 +469,17 @@ class ScreenMain(LcarsScreen):
                     stderr=subprocess.PIPE
                 )
                 
-                # Clear the spectrum scan display
                 self.spectrum_scan_display.set_spectrum_image(None)
             
                 
     def recordHandler(self, item, event, clock):
         """RECORD: Save screenshot, analyze, or demodulate FM"""
+        
+        # Geospatial mode: Save waypoint (future)
+        if self.topo_map.visible:
+            print("RECORD: Waypoint saved (not implemented yet)")
+            # TODO: Save current map center as waypoint
+            return
         
         # Microscope: Save screenshot
         if self.micro.scanning and self.microscope_gadget.visible:
@@ -529,67 +495,61 @@ class ScreenMain(LcarsScreen):
             print("Analyzing spectral data...")
         
         # EMF/Waterfall: Toggle FM demodulation
-        # Priority: waterfall display > spectrum scan display
         target_freq = None
         
         if self.waterfall_display.visible:
-            # Use waterfall's selected frequency
             if self.waterfall_display.selected_frequency:
-                target_freq = self.waterfall_display.selected_frequency / 1e6  # Convert to MHz
+                target_freq = self.waterfall_display.selected_frequency / 1e6
             else:
-                print("Please select a target frequency in the waterfall display first")
+                print("Please select a target frequency first")
                 return
                 
-            # Stop live scan process if running (must close SDR before demodulation)
             if self.waterfall_display.scan_active:
-                print("Stopping live scan to free SDR for FM demodulation...")
+                print("Stopping live scan for demodulation...")
                 self._stop_live_scan()
                 self.waterfall_display.scan_active = False
-                # Give the SDR a moment to fully close
                 sleep(0.5)
                 
         elif self.spectrum_scan_display.visible and self.spectrum_scan_display.scan_complete:
-            # Use spectrum scan display's selected frequency
             if not self.spectrum_scan_display.selected_frequency:
-                print("Please select a target frequency first by clicking on the spectrum")
+                print("Please select a target frequency first")
                 return
-            target_freq = self.spectrum_scan_display.selected_frequency / 1e6  # Convert to MHz
+            target_freq = self.spectrum_scan_display.selected_frequency / 1e6
         
-        # If we have a target frequency, toggle FM demodulation
         if target_freq is not None:
             target_freq_hz = int(target_freq * 1e6)
             
             if self.demodulator.is_active():
-                # Stop current demodulation
                 self._stop_fm_demodulation()
-                
-                # Update display (demodulator will show it's no longer active)
                 self._updateDemodulationInfo(target_freq_hz)
                 
-                # If waterfall display is visible, offer to restart the scan
                 if self.waterfall_display.visible and not self.waterfall_display.scan_active:
                     print("Restarting live waterfall scan...")
-                    # Give the SDR a moment to fully close
                     sleep(0.5)
-                    
-                    # Restart live scan at the same frequency using widget method
                     self.waterfall_display.start_scan(target_freq_hz)
                     print("Live waterfall scan restarted at {:.3f} MHz".format(target_freq))
             else:
-                # Start FM demodulation using widget
                 self.demodulator.start_demodulation(target_freq_hz)
-                
-                # Update display (demodulator will show ">>> ACTIVE <<<")
                 self._updateDemodulationInfo(target_freq_hz)
                 
-                # If waterfall was running, inform user
                 if self.waterfall_display.visible:
-                    print("Live waterfall paused during demodulation")
-                    print("Click RECORD again to stop and restart waterfall")        
+                    print("Live waterfall paused during demodulation")        
         
             
     def analyzeHandler(self, item, event, clock):
         """ANALYZE: Start/stop live waterfall scan OR review microscope images"""
+        
+        # Geospatial mode: Toggle between static dashboard and topo map
+        if self.topo_map.visible:
+            print("ANALYZE: Switching to static dashboard")
+            self.topo_map.visible = False
+            self.dashboard.visible = True
+            return
+        elif self.dashboard.visible:
+            print("ANALYZE: Switching to topo map")
+            self.dashboard.visible = False
+            self.topo_map.visible = True
+            return
         
         # Microscope: Review saved images
         if self.microscope_gadget_ref.visible:
@@ -607,36 +567,27 @@ class ScreenMain(LcarsScreen):
                 
             sorted_files = sorted(files, key=lambda f: os.path.getmtime(f), reverse=True)
             
-            # Show file list
             self.microscope_file_list.visible = True
             
-            # Populate file list with short timestamp format
-            # Format: "01/11 14:23:45" (date time only, fits in 215px)
             file_display_names = []
             for f in sorted_files:
-                # Get file timestamp
                 mtime = os.path.getmtime(f)
-                # Short format: MM/DD HH:MM:SS
                 timestamp = datetime.fromtimestamp(mtime).strftime("%m/%d %H:%M:%S")
                 file_display_names.append(timestamp)
             
             self.microscope_file_list.set_lines(file_display_names)
             
-            # Set initial selection
             if self.micro.reviewing >= len(files):
                 self.micro.reviewing = 0
             self.microscope_file_list.set_selected_index(self.micro.reviewing)
             
-            # Load and display the selected image
             self._loadMicroscopeImage()
             self.micro.reviewing += 1
             
         # EMF: Toggle live waterfall scan
         if self.emf_gadget.visible or self.frequency_selector.visible or self.waterfall_display.visible or self.spectrum_scan_display.visible:
-            # Determine target frequency
             target_freq = None
             
-            # Priority: spectrum scan display selection > frequency selector selection > default
             if self.spectrum_scan_display.visible and self.spectrum_scan_display.selected_frequency:
                 target_freq = self.spectrum_scan_display.selected_frequency
             elif hasattr(self.frequency_selector, 'selected_frequency') and self.frequency_selector.selected_frequency:
@@ -645,77 +596,86 @@ class ScreenMain(LcarsScreen):
                 print("Please select a target frequency first")
                 return
             
-            # Hide frequency selector and spectrum scan display, keep only waterfall or hide all
             self.frequency_selector.visible = False
             self.spectrum_scan_display.visible = False
             self.emf_gadget.visible = False
             
             if not self.waterfall_display.scan_active:
-                # Start live scan using widget method
                 print("Starting live waterfall at {:.3f} MHz...".format(target_freq / 1e6))
                 self.waterfall_display.start_scan(target_freq)
                 self.waterfall_display.visible = True
                 self.waterfall_display.set_selected_frequency(target_freq)
                 
-                # Update demodulation info display
                 self._updateDemodulationInfo(target_freq)
             else:
-                # Stop live scan but keep waterfall visible (frozen)
                 print("Stopping live scan - waterfall frozen")
                 self._stop_live_scan()
-                
-                # Also stop FM demodulation if active (can't have both)
                 self._stop_fm_demodulation()
             
        
-    # Navigation handlers - consolidated
+    # Navigation handlers - NOW WITH TOPO MAP SUPPORT
     def navHandlerUp(self, item, event, clock):
-        # If waterfall active, increase bandwidth
-        if self.waterfall_display.visible and self.waterfall_display.scan_active:
-            self._adjust_waterfall_bandwidth(1)  # Increase
+        # Topo map: Pan north
+        if self.topo_map.visible:
+            self.topo_map.pan(0, self.topo_pan_speed)
             return
         
-        # Otherwise handle microscope navigation
+        # Waterfall: increase bandwidth
+        if self.waterfall_display.visible and self.waterfall_display.scan_active:
+            self._adjust_waterfall_bandwidth(1)
+            return
+        
+        # Microscope navigation
         self._handleMicroscopeNavigation(review_index=0)
             
     def navHandlerDown(self, item, event, clock):
-        # If waterfall active, decrease bandwidth
-        if self.waterfall_display.visible and self.waterfall_display.scan_active:
-            self._adjust_waterfall_bandwidth(-1)  # Decrease
+        # Topo map: Pan south
+        if self.topo_map.visible:
+            self.topo_map.pan(0, -self.topo_pan_speed)
             return
         
-        # Otherwise handle microscope navigation
+        # Waterfall: decrease bandwidth
+        if self.waterfall_display.visible and self.waterfall_display.scan_active:
+            self._adjust_waterfall_bandwidth(-1)
+            return
+        
+        # Microscope navigation
         self._handleMicroscopeNavigation(review_index=-1)
                        
     def navHandlerLeft(self, item, event, clock):
-        # If waterfall active, decrease frequency
-        if self.waterfall_display.visible and self.waterfall_display.scan_active:
-            self._adjust_waterfall_frequency(-1)  # Decrease
+        # Topo map: Pan west
+        if self.topo_map.visible:
+            self.topo_map.pan(-self.topo_pan_speed, 0)
             return
         
-        # Otherwise handle microscope navigation and EMF
+        # Waterfall: decrease frequency
+        if self.waterfall_display.visible and self.waterfall_display.scan_active:
+            self._adjust_waterfall_frequency(-1)
+            return
+        
+        # Microscope navigation
         self._handleMicroscopeNavigation(increment=-1)
         if self.emf_gadget.emf_scanning:
             self.emf_gadget.target_frequency -= 1
                           
     def navHandlerRight(self, item, event, clock):
-        # If waterfall active, increase frequency
-        if self.waterfall_display.visible and self.waterfall_display.scan_active:
-            self._adjust_waterfall_frequency(1)  # Increase
+        # Topo map: Pan east
+        if self.topo_map.visible:
+            self.topo_map.pan(self.topo_pan_speed, 0)
             return
         
-        # Otherwise handle microscope navigation and EMF
+        # Waterfall: increase frequency
+        if self.waterfall_display.visible and self.waterfall_display.scan_active:
+            self._adjust_waterfall_frequency(1)
+            return
+        
+        # Microscope navigation
         self._handleMicroscopeNavigation(increment=1)
         if self.emf_gadget.emf_scanning:
             self.emf_gadget.target_frequency += 1
     
     def _handleMicroscopeNavigation(self, review_index=None, increment=None):
-        """Handle microscope image navigation with file list sync
-        
-        Args:
-            review_index: If set, jump to specific index (0=first, -1=last)
-            increment: If set, move by this amount (1=next, -1=previous)
-        """
+        """Handle microscope image navigation with file list sync"""
         
         if self.microscope_gadget_ref.visible:
             self.microscope_gadget_ref.visible = False
@@ -724,19 +684,16 @@ class ScreenMain(LcarsScreen):
         if not self.microscope_gadget.visible:
             return
              
-        # Stop live scanning if active
         if self.micro.scanning:
             self.micro.cam.stop()
         self.micro.scanning = False
         
-        # Get sorted list of microscope images
         files = glob.glob("/home/tricorder/rpi_lcars-master/app/screenshots/microscope_*.jpg")
         if not files:
             return
             
         sorted_files = sorted(files, key=lambda f: os.path.getmtime(f), reverse=True)
         
-        # Update review index
         if review_index is not None:
             if review_index == -1:
                 self.micro.reviewing = len(files) - 1
@@ -749,23 +706,41 @@ class ScreenMain(LcarsScreen):
             elif self.micro.reviewing < 0:
                 self.micro.reviewing = len(files) - 1
         
-        # Update file list selection (if visible)
         if self.microscope_file_list.visible:
             self.microscope_file_list.set_selected_index(self.micro.reviewing)
         
-        # Load and display the image
         self._loadMicroscopeImage()
             
-    # TO DO: put these into an array and iterate over them instead
     def gaugesHandler(self, item, event, clock):
-        """Switch to GEOSPATIAL dashboard view"""
+        """Switch to GEOSPATIAL mode (now with topo map!)"""
         self._switch_to_mode('dashboard')
+        
+        # Lazy load DEM data if not already loaded
+        if self.topo_map.dem_data is None and os.path.exists(self.dem_file_path):
+            print("Loading DEM data for first time...")
+            self.topo_map.load_dem(self.dem_file_path)
+        
+        # Update text display with geospatial info
+        self.microscope_file_list.set_lines([
+            "GEOSPATIAL MODE",
+            "",
+            "Navigation:",
+            "  WASD: Pan map",
+            "  Up/Down: Zoom",
+            "",
+            "Actions:",
+            "  ANALYZE: Toggle",
+            "    topo/static",
+            "  RECORD: Save",
+            "    waypoint (TBD)",
+            "  SCAN: GPS update",
+            "    (TBD)"
+        ])
 
     def microscopeHandler(self, item, event, clock):
         """Switch to MICROSCOPE view and start scanning"""
         self._switch_to_mode('microscope')
         
-        # Clear file list when starting live scan
         self.microscope_file_list.clear()
         
         if not self.micro.scanning:
@@ -780,11 +755,9 @@ class ScreenMain(LcarsScreen):
     def emfHandler(self, item, event, clock):
         """Switch to EMF spectrum analyzer view"""
         self._switch_to_mode('emf')
-        # Make sure frequency selector and spectrum scan display are hidden
         self.frequency_selector.visible = False
         self.spectrum_scan_display.visible = False
         
-        # Update text display with demod info (no frequency selected yet)
         self._updateDemodulationInfo(None)
         
     def spectralHandler(self, item, event, clock):
