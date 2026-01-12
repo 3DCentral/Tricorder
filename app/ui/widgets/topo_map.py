@@ -18,10 +18,10 @@ class LcarsTopoMap(LcarsWidget):
     """
     
     # Constants for contour generation
-    DEFAULT_CONTOUR_LEVELS = 15
+    DEFAULT_CONTOUR_LEVELS = 10  # Reduced from 15 for better performance
     DEFAULT_OUTLIER_THRESHOLD = 3.0
     SAMPLE_SIZE = 500
-    MOVEMENT_THRESHOLD = 5  # Pixels of movement before regenerating
+    MOVEMENT_THRESHOLD = 15  # Increased from 5 - regenerate less often
     ZOOM_THRESHOLD = 0.02   # Zoom change before regenerating
     
     def __init__(self, pos, size=(640, 480), dem_file_path=None):
@@ -36,7 +36,7 @@ class LcarsTopoMap(LcarsWidget):
         self.display_width = size[0]
         self.display_height = size[1]
         self.image = pygame.Surface(size)
-        self.image.fill((240, 240, 230))  # Beige background
+        self.image.fill((0, 0, 0))  # Black background (LCARS style)
         
         LcarsWidget.__init__(self, None, pos, size)
         
@@ -86,8 +86,29 @@ class LcarsTopoMap(LcarsWidget):
             
             print("Loading DEM file: {}".format(file_path))
             
+            # Increase PIL's decompression bomb limit for large DEMs
+            # Default is 178,956,970 pixels, we'll increase to 500M for USGS DEMs
+            Image.MAX_IMAGE_PIXELS = 500000000
+            
             # Open with PIL
             img = Image.open(file_path)
+            
+            # Get image dimensions before loading
+            width, height = img.size
+            print("DEM dimensions: {}x{} pixels ({:.1f} megapixels)".format(
+                width, height, (width * height) / 1000000))
+            
+            # Check if image is too large - if so, downsample
+            max_size = 8000  # Maximum dimension we'll load
+            if width > max_size or height > max_size:
+                print("WARNING: DEM is very large. Downsampling for performance...")
+                scale = min(max_size / width, max_size / height)
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                
+                # Downsample the image
+                img = img.resize((new_width, new_height), Image.BILINEAR)
+                print("Downsampled to: {}x{} pixels".format(new_width, new_height))
             
             # Convert to numpy array
             # GeoTIFF elevation data is typically stored as 16-bit or 32-bit integers
@@ -132,9 +153,14 @@ class LcarsTopoMap(LcarsWidget):
             
             self.dem_file_path = file_path
             
-            # Center the view
-            self.cam_x = 0
-            self.cam_y = 0
+            # Center the view on the middle of the DEM
+            # Camera position is negative of the center point (viewport coordinates)
+            self.cam_x = -self.dem_width / 2
+            self.cam_y = -self.dem_height / 2
+            
+            # Start zoomed in for better detail (but not too much)
+            # Zoom of 1.5 = good balance of overview and detail
+            self.zoom = 1.5
             
             # Invalidate cache
             self.cached_surf = None
@@ -143,6 +169,10 @@ class LcarsTopoMap(LcarsWidget):
                 self.dem_width, self.dem_height))
             print("Elevation range: {:.1f} to {:.1f}".format(
                 np.min(self.dem_data), np.max(self.dem_data)))
+            print("Memory usage: ~{:.1f} MB".format(
+                self.dem_data.nbytes / 1024 / 1024))
+            print("Starting view: centered at ({:.0f}, {:.0f}), zoom {:.1f}x".format(
+                self.dem_width / 2, self.dem_height / 2, self.zoom))
             
             return True
             
@@ -294,15 +324,69 @@ class LcarsTopoMap(LcarsWidget):
         if patch.size == 0:
             return None, 0, 0, {}
         
-        # Generate contours using matplotlib
+        # Create surface for rendering
+        surf = pygame.Surface((x_end - x_start, y_end - y_start), pygame.SRCALPHA)
+        surf.fill((0, 0, 0, 255))  # Start with black background
+        
+        # STEP 1: Draw elevation-based color gradient FIRST (underneath contours)
+        # Normalize elevation data to 0-1 range for this patch
+        patch_min = np.min(patch)
+        patch_max = np.max(patch)
+        patch_range = patch_max - patch_min
+        
+        if patch_range > 0:
+            # PERFORMANCE: Downsample elevation data for coloring
+            # We don't need full resolution for the color gradient
+            # Downsample to roughly screen resolution
+            target_size = 200  # pixels - good balance of quality and speed
+            height, width = patch.shape
+            
+            if height > target_size or width > target_size:
+                # Calculate downsample factor
+                downsample = max(height // target_size, width // target_size, 1)
+                # Downsample using slicing (very fast)
+                patch_small = patch[::downsample, ::downsample]
+            else:
+                patch_small = patch
+            
+            # Normalize to 0-1 (VECTORIZED - very fast!)
+            normalized = (patch_small - patch_min) / patch_range
+            
+            # Create color gradient using VECTORIZED operations (100x faster than loops!)
+            height_small, width_small = normalized.shape
+            
+            # Pre-allocate RGB array
+            color_array = np.zeros((height_small, width_small, 3), dtype=np.uint8)
+            
+            # Lower half: black to dark blue (VECTORIZED)
+            lower_mask = normalized < 0.5
+            intensity_lower = normalized[lower_mask] * 2
+            color_array[lower_mask, 2] = (intensity_lower * 128).astype(np.uint8)  # Blue channel
+            
+            # Upper half: blue to light blue/white (VECTORIZED)
+            upper_mask = normalized >= 0.5
+            intensity_upper = (normalized[upper_mask] - 0.5) * 2
+            color_array[upper_mask, 0] = (intensity_upper * 200).astype(np.uint8)  # Red channel
+            color_array[upper_mask, 1] = (intensity_upper * 220).astype(np.uint8)  # Green channel
+            color_array[upper_mask, 2] = (128 + intensity_upper * 127).astype(np.uint8)  # Blue channel
+            
+            # Convert to pygame surface (fast!)
+            elevation_surface = pygame.surfarray.make_surface(np.transpose(color_array, (1, 0, 2)))
+            
+            # Scale up to full size if we downsampled
+            if height > target_size or width > target_size:
+                elevation_surface = pygame.transform.smoothscale(elevation_surface, (width, height))
+            
+            # Blit to main surface
+            surf.blit(elevation_surface, (0, 0))
+        
+        # STEP 2: Generate and draw contours ON TOP of elevation colors
         try:
             fig, ax = plt.subplots()
             contours = ax.contour(patch, levels=self.DEFAULT_CONTOUR_LEVELS)
             plt.close(fig)
             
             # Get contour paths - compatible with older matplotlib versions
-            # In older versions, use contours.collections
-            # In newer versions, use contours.get_paths()
             try:
                 all_paths = contours.get_paths()
             except AttributeError:
@@ -314,15 +398,16 @@ class LcarsTopoMap(LcarsWidget):
                         
         except Exception as e:
             print("Error generating contours: {}".format(e))
-            return None, 0, 0, {}
-        adaptive_threshold = self._analyze_contour_segments_fast(all_paths)
+            return surf, x_start - visible_x_start, y_start - visible_y_start, {}
         
-        # Create surface for rendering
-        surf = pygame.Surface((x_end - x_start, y_end - y_start), pygame.SRCALPHA)
-        surf.fill((255, 255, 255, 0))
+        adaptive_threshold = self._analyze_contour_segments_fast(all_paths)
         
         total_segments = 0
         filtered_segments = 0
+        
+        # Create a separate surface for contours with transparency
+        contour_surf = pygame.Surface((x_end - x_start, y_end - y_start), pygame.SRCALPHA)
+        contour_surf.fill((0, 0, 0, 0))  # Fully transparent
         
         # Draw contours with adaptive filtering
         for path in all_paths:
@@ -337,8 +422,11 @@ class LcarsTopoMap(LcarsWidget):
                 for segment in segments:
                     if len(segment) > 1:
                         segment_list = segment.tolist() if isinstance(segment, np.ndarray) else segment
-                        # Brown contour lines
-                        pygame.draw.lines(surf, (80, 50, 20), False, segment_list, 1)
+                        # Yellow contour lines (LCARS style) on transparent surface
+                        pygame.draw.lines(contour_surf, (255, 255, 0, 255), False, segment_list, 1)
+        
+        # Blit contours on top of elevation colors
+        surf.blit(contour_surf, (0, 0))
         
         offset_x = x_start - visible_x_start
         offset_y = y_start - visible_y_start
@@ -346,7 +434,9 @@ class LcarsTopoMap(LcarsWidget):
         stats = {
             'threshold': adaptive_threshold,
             'total_paths': total_segments,
-            'filtered': filtered_segments
+            'filtered': filtered_segments,
+            'elev_min': patch_min if patch_range > 0 else 0,
+            'elev_max': patch_max if patch_range > 0 else 0
         }
         
         return surf, offset_x, offset_y, stats
@@ -372,16 +462,28 @@ class LcarsTopoMap(LcarsWidget):
         
         # Determine cache status
         cache_status = "CACHED" if not self._needs_regeneration() else "UPDATING"
-        cache_color = (50, 150, 50) if not self._needs_regeneration() else (150, 50, 50)
+        cache_color = (153, 255, 153) if not self._needs_regeneration() else (255, 153, 153)  # Light green / light red
+        
+        # LCARS colors: light blue for text
+        text_color = (153, 153, 255)  # Light blue (LCARS BLUE)
         
         info_lines = [
             ("Zoom: {:.2f}x | {}".format(self.zoom, cache_status), cache_color),
-            ("Sensitivity: {:.2f}σ".format(self.outlier_threshold), (80, 50, 20)),
+            ("Sensitivity: {:.2f}σ".format(self.outlier_threshold), text_color),
             ("Contours: {} ({} filtered)".format(
                 self.stats.get('total_paths', 0),
                 self.stats.get('filtered', 0)
-            ), (80, 50, 20))
+            ), text_color)
         ]
+        
+        # Add elevation range if available
+        if 'elev_min' in self.stats and 'elev_max' in self.stats:
+            elev_min = self.stats['elev_min']
+            elev_max = self.stats['elev_max']
+            if elev_max > elev_min:
+                info_lines.append(
+                    ("Elevation: {:.0f} - {:.0f}m".format(elev_min, elev_max), text_color)
+                )
         
         y_pos = 10
         for line_text, color in info_lines:
@@ -389,10 +491,10 @@ class LcarsTopoMap(LcarsWidget):
             bg_rect = text.get_rect(topleft=(10, y_pos))
             bg_rect.inflate_ip(10, 4)
             
-            # Semi-transparent background
+            # Semi-transparent dark background (LCARS style)
             bg_surf = pygame.Surface((bg_rect.width, bg_rect.height))
-            bg_surf.set_alpha(200)
-            bg_surf.fill((240, 240, 230))
+            bg_surf.set_alpha(180)
+            bg_surf.fill((0, 0, 0))  # Black background
             surface.blit(bg_surf, bg_rect)
             
             surface.blit(text, (10, y_pos))
@@ -401,12 +503,12 @@ class LcarsTopoMap(LcarsWidget):
     def _draw_no_data_message(self, surface):
         """Draw message when no DEM data is loaded"""
         font = pygame.font.Font("assets/swiss911.ttf", 24)
-        text = font.render("NO DEM DATA LOADED", True, (150, 50, 50))
+        text = font.render("NO DEM DATA LOADED", True, (255, 153, 0))  # LCARS Orange
         text_rect = text.get_rect(center=(self.display_width // 2, self.display_height // 2))
         surface.blit(text, text_rect)
         
         font_small = pygame.font.Font("assets/swiss911.ttf", 16)
-        text2 = font_small.render("Place GeoTIFF file in assets/", True, (100, 100, 100))
+        text2 = font_small.render("Place GeoTIFF file in assets/", True, (153, 153, 255))  # LCARS Blue
         text2_rect = text2.get_rect(center=(self.display_width // 2, self.display_height // 2 + 40))
         surface.blit(text2, text2_rect)
     
@@ -415,8 +517,8 @@ class LcarsTopoMap(LcarsWidget):
         if not self.visible:
             return
         
-        # Clear surface
-        self.image.fill((240, 240, 230))
+        # Clear surface with black background (LCARS style)
+        self.image.fill((0, 0, 0))
         
         # Check if DEM data is loaded
         if self.dem_data is None:
