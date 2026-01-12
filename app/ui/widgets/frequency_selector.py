@@ -6,7 +6,7 @@ from ui.widgets.sprite import LcarsWidget
 class LcarsFrequencySelector(LcarsWidget):
     """
     Frequency selector widget with logarithmic scale
-    Allows selection of target frequency from 50 Hz to 2.2 GHz
+    Allows selection of target frequency from 50 MHz to 2.2 GHz (RTL-SDR range)
     """
     
     def __init__(self, pos, size=(640, 144)):
@@ -24,8 +24,8 @@ class LcarsFrequencySelector(LcarsWidget):
         
         LcarsWidget.__init__(self, None, pos, size)
         
-        # Frequency range (in Hz)
-        self.freq_min = 50  # 50 Hz
+        # Frequency range (in Hz) - RTL-SDR typical range
+        self.freq_min = 50e6  # 50 MHz
         self.freq_max = 2.2e9  # 2.2 GHz
         
         # Selected frequency
@@ -128,11 +128,10 @@ class LcarsFrequencySelector(LcarsWidget):
                         3)
         
         # Draw major tick marks and labels
-        # Frequencies to mark: 100Hz, 1kHz, 10kHz, 100kHz, 1MHz, 10MHz, 100MHz, 1GHz
+        # Frequencies to mark: 50MHz, 100MHz, 500MHz, 1GHz, 2GHz
         major_freqs = [
-            100, 1e3, 10e3, 100e3, 
-            1e6, 10e6, 100e6, 
-            1e9
+            50e6, 100e6, 200e6, 500e6,
+            1e9, 2e9
         ]
         
         font_small = pygame.font.Font("assets/swiss911.ttf", 20)
@@ -155,11 +154,21 @@ class LcarsFrequencySelector(LcarsWidget):
             text_rect = text.get_rect(center=(x, y_base + 25))
             surface.blit(text, text_rect)
         
-        # Draw minor tick marks
+        # Draw minor tick marks for intermediate frequencies
         minor_freqs = []
-        for decade_start in [100, 1e3, 10e3, 100e3, 1e6, 10e6, 100e6, 1e9]:
-            for i in range(2, 10):
-                minor_freqs.append(decade_start * i)
+        # Add minor ticks between major ones
+        for decade_start in [50e6, 100e6, 500e6, 1e9]:
+            if decade_start >= 1e9:
+                # For GHz range, add 0.2, 0.5, etc.
+                for i in [2, 3, 4, 5, 6, 7, 8, 9]:
+                    minor_freqs.append(decade_start * i / 10)
+            else:
+                # For MHz range
+                for i in [2, 3, 4, 5, 6, 7, 8, 9]:
+                    if decade_start < 100e6:
+                        minor_freqs.append(decade_start * i)
+                    else:
+                        minor_freqs.append(decade_start + i * 100e6)
         
         for freq in minor_freqs:
             if freq < self.freq_min or freq > self.freq_max:

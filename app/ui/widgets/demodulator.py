@@ -40,7 +40,8 @@ class LcarsDemodulator(LcarsWidget):
             freq_mhz: Frequency in MHz
             
         Returns:
-            Dictionary with mode, sample_rate, bandwidth, gain, squelch, and mode_name
+            Dictionary with mode, sample_rate, bandwidth, gain, squelch, mode_name,
+            band_name, and band_description
         """
         # Weather Radio (NOAA): 162.400 - 162.550 MHz
         # Uses narrow-band FM (NBFM) with 12.5 kHz deviation
@@ -51,7 +52,13 @@ class LcarsDemodulator(LcarsWidget):
                 'bandwidth': 16000,     # 16 kHz bandwidth
                 'gain': 40,             # Specific gain for weak signals
                 'squelch': 0,           # No squelch initially (hear everything)
-                'mode_name': 'NBFM (Weather Radio)'
+                'mode_name': 'NBFM (Weather Radio)',
+                'band_name': 'NOAA Weather Radio',
+                'band_description': [
+                    'Continuous weather',
+                    'broadcasts, warnings,',
+                    'and forecasts'
+                ]
             }
         
         # Marine VHF: 156-162 MHz
@@ -63,7 +70,13 @@ class LcarsDemodulator(LcarsWidget):
                 'bandwidth': 12500,
                 'gain': None,           # Auto gain
                 'squelch': 0,
-                'mode_name': 'NBFM (Marine VHF)'
+                'mode_name': 'NBFM (Marine VHF)',
+                'band_name': 'Marine VHF Radio',
+                'band_description': [
+                    'Ship-to-ship and',
+                    'ship-to-shore',
+                    'communications'
+                ]
             }
         
         # Aviation: 118-137 MHz
@@ -75,7 +88,13 @@ class LcarsDemodulator(LcarsWidget):
                 'bandwidth': 10000,     # 10 kHz for AM aviation
                 'gain': None,
                 'squelch': 0,
-                'mode_name': 'AM (Aviation)'
+                'mode_name': 'AM (Aviation)',
+                'band_name': 'Aviation Band',
+                'band_description': [
+                    'Air traffic control,',
+                    'pilot communications,',
+                    'and ATIS broadcasts'
+                ]
             }
         
         # 2-meter Ham Radio: 144-148 MHz
@@ -87,7 +106,13 @@ class LcarsDemodulator(LcarsWidget):
                 'bandwidth': 16000,
                 'gain': None,
                 'squelch': 0,
-                'mode_name': 'NBFM (2m Ham)'
+                'mode_name': 'NBFM (2m Ham)',
+                'band_name': '2m Ham Radio (VHF)',
+                'band_description': [
+                    'Amateur radio',
+                    'repeaters and',
+                    'simplex operations'
+                ]
             }
         
         # Commercial FM Broadcast: 88-108 MHz
@@ -99,7 +124,13 @@ class LcarsDemodulator(LcarsWidget):
                 'bandwidth': 200000,
                 'gain': None,
                 'squelch': 0,
-                'mode_name': 'WBFM (FM Broadcast)'
+                'mode_name': 'WBFM (FM Broadcast)',
+                'band_name': 'FM Broadcast Radio',
+                'band_description': [
+                    'Commercial radio',
+                    'stations with music',
+                    'and talk programming'
+                ]
             }
         
         # PMR446 / FRS / GMRS: 446-467 MHz
@@ -111,7 +142,13 @@ class LcarsDemodulator(LcarsWidget):
                 'bandwidth': 12500,
                 'gain': None,
                 'squelch': 0,
-                'mode_name': 'NBFM (PMR/FRS/GMRS)'
+                'mode_name': 'NBFM (PMR/FRS/GMRS)',
+                'band_name': 'PMR446/FRS/GMRS',
+                'band_description': [
+                    'Personal mobile radio,',
+                    'family radio service,',
+                    'and walkie-talkies'
+                ]
             }
         
         # 70cm Ham Radio: 420-450 MHz
@@ -123,7 +160,13 @@ class LcarsDemodulator(LcarsWidget):
                 'bandwidth': 16000,
                 'gain': None,
                 'squelch': 0,
-                'mode_name': 'NBFM (70cm Ham)'
+                'mode_name': 'NBFM (70cm Ham)',
+                'band_name': '70cm Ham Radio (UHF)',
+                'band_description': [
+                    'Amateur radio UHF',
+                    'repeaters and',
+                    'satellite operations'
+                ]
             }
         
         # Default: Use narrow-band FM for most applications
@@ -135,8 +178,77 @@ class LcarsDemodulator(LcarsWidget):
                 'bandwidth': 12500,
                 'gain': None,
                 'squelch': 0,
-                'mode_name': 'NBFM (Default)'
+                'mode_name': 'NBFM (Default)',
+                'band_name': 'Unknown Band',
+                'band_description': [
+                    'Unknown frequency',
+                    'range - using',
+                    'default NBFM mode'
+                ]
             }
+    
+    def get_demodulation_info(self, freq_hz):
+        """
+        Get formatted demodulation information for display
+        
+        Args:
+            freq_hz: Frequency in Hz (or None)
+            
+        Returns:
+            List of strings suitable for LcarsTextDisplay.set_lines()
+        """
+        if freq_hz is None:
+            return [
+                "DEMODULATION INFO",
+                "",
+                "Select a frequency",
+                "to see protocols"
+            ]
+        
+        # Get demodulation parameters
+        freq_mhz = freq_hz / 1e6
+        params = self.get_demodulation_params(freq_mhz)
+        
+        # Build info display
+        lines = [
+            "DEMOD: {:.3f} MHz".format(freq_mhz),
+            "",
+        ]
+        
+        # Add active indicator if demodulation is running
+        if self.is_active():
+            lines.append(">>> ACTIVE <<<")
+            lines.append("")
+        
+        # Add mode name
+        lines.append("Mode: {}".format(params['mode_name']))
+        lines.append("")
+        
+        # Add technical details
+        if params['bandwidth'] >= 1000:
+            lines.append("BW: {:.1f} kHz".format(params['bandwidth'] / 1000))
+        else:
+            lines.append("BW: {:.0f} Hz".format(params['bandwidth']))
+        
+        if params['sample_rate'] >= 1000:
+            lines.append("SR: {:.0f} kHz".format(params['sample_rate'] / 1000))
+        else:
+            lines.append("SR: {:.0f} Hz".format(params['sample_rate']))
+        
+        if params.get('gain') is not None:
+            lines.append("Gain: {} dB".format(params['gain']))
+        else:
+            lines.append("Gain: Auto")
+        
+        # Add band description
+        lines.append("")
+        lines.append(params['band_name'])
+        lines.append("")
+        
+        # Add detailed description (already formatted as list)
+        lines.extend(params['band_description'])
+        
+        return lines
     
     def start_demodulation(self, frequency_hz):
         """

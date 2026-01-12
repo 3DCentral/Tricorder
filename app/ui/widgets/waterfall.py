@@ -7,6 +7,8 @@ class LcarsWaterfall(LcarsWidget):
     """
     Waterfall display widget for live SDR spectrum visualization
     Shows a scrolling 2D spectrogram with PSD overlay
+    
+    OPTIMIZED VERSION - Uses numpy array operations instead of pixel-by-pixel rendering
     """
     
     def __init__(self, pos, size=(640, 480)):
@@ -36,6 +38,9 @@ class LcarsWaterfall(LcarsWidget):
         # Color map for waterfall (blue -> green -> yellow -> red)
         self.colormap = self._generate_colormap()
         
+        # OPTIMIZATION: Pre-generate colormap as numpy array for fast indexing
+        self.colormap_array = np.array(self.colormap, dtype=np.uint8)
+        
         # Frequency selection
         self.selected_frequency = None
         self.selected_x = None
@@ -43,11 +48,11 @@ class LcarsWaterfall(LcarsWidget):
         # Demodulator reference (for bandwidth visualization)
         self.demodulator = None
         
-        # NEW: Process management for live scanning
+        # Process management for live scanning
         self.scan_process = None
         self.scan_active = False
         
-        # NEW: Bandwidth control
+        # Bandwidth control
         self.bandwidth_options = [
             200000,   # 200 kHz - Very narrow (single channel)
             500000,   # 500 kHz
@@ -59,6 +64,10 @@ class LcarsWaterfall(LcarsWidget):
         self.bandwidth_index = 4  # Start at 2.4 MHz (index 4)
         self.current_bandwidth = 2400000  # 2.4 MHz default
         self.center_frequency = None
+        
+        # OPTIMIZATION: Cache rendered waterfall surface to avoid re-rendering when paused
+        self.cached_waterfall_surface = None
+        self.data_hash = None  # Track if data has changed
     
     def stop_scan(self):
         """Stop live waterfall scan"""
@@ -90,6 +99,10 @@ class LcarsWaterfall(LcarsWidget):
         # Store parameters
         self.center_frequency = center_freq
         self.current_bandwidth = sample_rate
+        
+        # Invalidate cache when starting new scan
+        self.cached_waterfall_surface = None
+        self.data_hash = None
         
         # Start subprocess
         self.scan_process = subprocess.Popen(
@@ -227,6 +240,12 @@ class LcarsWaterfall(LcarsWidget):
         self.waterfall_data = waterfall_data
         self.psd_data = psd_data
         self.frequencies = frequencies
+        
+        # Invalidate cache when data changes
+        new_hash = hash(waterfall_data.tobytes()) if waterfall_data is not None else None
+        if new_hash != self.data_hash:
+            self.cached_waterfall_surface = None
+            self.data_hash = new_hash
     
     def get_frequency_from_x(self, x_pos):
         """Convert X pixel position to frequency
@@ -292,31 +311,41 @@ class LcarsWaterfall(LcarsWidget):
         return normalized
     
     def _draw_waterfall(self, surface):
-        """Draw the waterfall spectrogram (newest data at bottom, scrolling down)"""
+        """Draw the waterfall spectrogram using OPTIMIZED numpy operations"""
         if self.waterfall_data is None:
+            return
+        
+        # Check if we can use cached surface (when paused)
+        if self.cached_waterfall_surface is not None and not self.scan_active:
+            surface.blit(self.cached_waterfall_surface, (0, self.psd_height))
             return
         
         # Get dimensions
         num_lines, num_bins = self.waterfall_data.shape
         
-        # Normalize data to color indices
+        # OPTIMIZATION: Normalize all data at once using numpy operations
         normalized = self._normalize_to_color_range(self.waterfall_data)
         
-        # Create waterfall image
-        waterfall_surface = pygame.Surface((num_bins, num_lines))
+        # OPTIMIZATION: Use numpy indexing to map all pixels to colors at once
+        # This is MUCH faster than pixel-by-pixel operations
+        # Shape will be (num_lines, num_bins, 3) for RGB
+        colored_data = self.colormap_array[normalized]
         
-        # Draw each line normally (no flip)
-        for line_idx in range(num_lines):
-            for bin_idx in range(num_bins):
-                color_idx = normalized[line_idx, bin_idx]
-                color = self.colormap[color_idx]
-                waterfall_surface.set_at((bin_idx, line_idx), color)
+        # OPTIMIZATION: Create surface from numpy array directly
+        # Transpose because pygame expects (width, height) but we have (height, width)
+        waterfall_surface = pygame.surfarray.make_surface(
+            np.transpose(colored_data, (1, 0, 2))
+        )
         
         # Scale to fit display
         scaled_waterfall = pygame.transform.scale(
             waterfall_surface, 
             (self.display_width, self.waterfall_height)
         )
+        
+        # Cache the surface if scan is paused
+        if not self.scan_active:
+            self.cached_waterfall_surface = scaled_waterfall
         
         # Blit to main surface (below PSD area)
         surface.blit(scaled_waterfall, (0, self.psd_height))
@@ -474,20 +503,28 @@ class LcarsWaterfall(LcarsWidget):
         surface.blit(text, text_rect)
     
     def update(self, screen):
-        """Update and render the waterfall display"""
+        """Update and render the waterfall display
+        
+        OPTIMIZED: Only re-renders when data changes or scan is active
+        """
         if not self.visible:
             return
         
-        # Clear surface
-        self.image.fill((0, 0, 0))
+        # OPTIMIZATION: Only clear and redraw if scanning or data changed
+        # This prevents continuous re-rendering when paused
+        needs_redraw = self.scan_active or self.cached_waterfall_surface is None
         
-        # Draw components
-        self._draw_waterfall(self.image)
-        self._draw_psd(self.image)
-        self._draw_frequency_selector(self.image)
-        self._draw_frequency_labels(self.image)
+        if needs_redraw:
+            # Clear surface
+            self.image.fill((0, 0, 0))
+            
+            # Draw components
+            self._draw_waterfall(self.image)
+            self._draw_psd(self.image)
+            self._draw_frequency_selector(self.image)
+            self._draw_frequency_labels(self.image)
         
-        # Blit to screen
+        # Always blit to screen (even if not redrawn, to maintain visibility)
         screen.blit(self.image, self.rect)
         
         self.dirty = 0
