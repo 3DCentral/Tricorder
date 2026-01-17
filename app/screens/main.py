@@ -722,6 +722,24 @@ class ScreenMain(LcarsScreen):
         # Lazy load DEM data if not already loaded
         if self.topo_map.dem_data is None and os.path.exists(self.dem_file_path):
             print("Loading DEM data for first time...")
+            
+            # Show loading message
+            self.microscope_file_list.set_lines([
+                "LOADING DEM DATA",
+                "",
+                "Please wait...",
+                "",
+                "Processing elevation",
+                "data from GeoTIFF",
+                "",
+                "This may take",
+                "10-20 seconds"
+            ])
+            
+            # Force update display to show loading message
+            self.microscope_file_list.dirty = 1
+            
+            # Load the DEM (this is the slow part)
             self.topo_map.load_dem(self.dem_file_path)
         
         # Update text display with geospatial info
