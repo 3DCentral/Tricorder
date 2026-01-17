@@ -85,8 +85,9 @@ class LcarsTopoMap(LcarsWidget):
         self.clicked_screen_y = None
         
         # Zoom levels for SCAN/ANALYZE buttons
-        self.zoom_levels = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0]
-        self.current_zoom_index = 2  # Start at 1.5x (index 2)
+        # Extended range to allow zooming farther out
+        self.zoom_levels = [0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0]
+        self.current_zoom_index = 5  # Start at 1.0x (index 5)
         
         # Load DEM data if path provided
         if dem_file_path:
@@ -178,16 +179,31 @@ class LcarsTopoMap(LcarsWidget):
                 width, height, (width * height) / 1000000))
             
             # Check if image is too large - if so, downsample
-            max_size = 8000  # Maximum dimension we'll load
+            # Be more aggressive with downsampling to improve load time
+            max_size = 4096  # Reduced from 8000 - still plenty of detail
             if width > max_size or height > max_size:
-                print("WARNING: DEM is very large. Downsampling for performance...")
+                print("DEM is large - downsampling for better performance...")
                 scale = min(max_size / width, max_size / height)
                 new_width = int(width * scale)
                 new_height = int(height * scale)
                 
                 # Downsample the image
+                print("  Downsampling to {}x{} ({:.0f}% of original size)...".format(
+                    new_width, new_height, scale * 100))
                 img = img.resize((new_width, new_height), Image.BILINEAR)
-                print("Downsampled to: {}x{} pixels".format(new_width, new_height))
+                print("  Downsampling complete!")
+            elif width * height > 10000000:  # > 10 megapixels
+                # Even if dimensions are OK, downsample if total pixels is very high
+                print("DEM has many pixels - downsampling for better performance...")
+                target_pixels = 8000000  # 8 megapixels is plenty
+                scale = np.sqrt(target_pixels / (width * height))
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                
+                print("  Downsampling to {}x{} ({:.0f}% of original size)...".format(
+                    new_width, new_height, scale * 100))
+                img = img.resize((new_width, new_height), Image.BILINEAR)
+                print("  Downsampling complete!")
             
             # Convert to numpy array
             # GeoTIFF elevation data is typically stored as 16-bit or 32-bit integers
@@ -550,6 +566,10 @@ class LcarsTopoMap(LcarsWidget):
         """
         Generate contours for the currently visible area
         
+        OPTIMIZED: Uses adaptive downsampling based on zoom level.
+        At low zoom (wide view), we downsample the DEM data significantly
+        since we don't need full resolution for the overview.
+        
         Returns:
             tuple: (surface, offset_x, offset_y, stats_dict)
         """
@@ -573,7 +593,35 @@ class LcarsTopoMap(LcarsWidget):
         if patch.size == 0:
             return None, 0, 0, {}
         
+        # OPTIMIZATION: Adaptive downsampling based on zoom level
+        # At low zoom, we don't need full resolution
+        # This is the KEY optimization for performance at low zoom!
+        # REDUCED AGGRESSIVENESS per user feedback
+        downsample_factor = 1
+        
+        if self.zoom < 0.3:
+            # Very very zoomed out - moderate downsampling
+            downsample_factor = 4
+        elif self.zoom < 0.75:
+            # Very zoomed out - light downsampling
+            downsample_factor = 3
+        elif self.zoom < 1.5:
+            # Zoomed out - minimal downsampling
+            downsample_factor = 2
+        # else: zoom >= 1.5 - use full resolution (downsample_factor = 1)
+        
+        # Apply downsampling if needed
+        if downsample_factor > 1:
+            # Downsample using numpy slicing (very fast!)
+            patch_display = patch[::downsample_factor, ::downsample_factor]
+            print("Downsampled DEM by {}x for contours (zoom {:.1f}x): {} -> {} pixels".format(
+                downsample_factor, self.zoom,
+                patch.shape, patch_display.shape))
+        else:
+            patch_display = patch
+        
         # Create surface for rendering
+        # Surface size matches the ORIGINAL patch size (we'll scale up the downsampled contours)
         surf = pygame.Surface((x_end - x_start, y_end - y_start), pygame.SRCALPHA)
         surf.fill((0, 0, 0, 255))  # Start with black background
         
@@ -592,9 +640,9 @@ class LcarsTopoMap(LcarsWidget):
             
             if height > target_size or width > target_size:
                 # Calculate downsample factor
-                downsample = max(height // target_size, width // target_size, 1)
+                downsample_color = max(height // target_size, width // target_size, 1)
                 # Downsample using slicing (very fast)
-                patch_small = patch[::downsample, ::downsample]
+                patch_small = patch[::downsample_color, ::downsample_color]
             else:
                 patch_small = patch
             
@@ -630,9 +678,10 @@ class LcarsTopoMap(LcarsWidget):
             surf.blit(elevation_surface, (0, 0))
         
         # STEP 2: Generate and draw contours ON TOP of elevation colors
+        # Use the DOWNSAMPLED patch for contour generation (much faster!)
         try:
             fig, ax = plt.subplots()
-            contours = ax.contour(patch, levels=self.DEFAULT_CONTOUR_LEVELS)
+            contours = ax.contour(patch_display, levels=self.DEFAULT_CONTOUR_LEVELS)
             plt.close(fig)
             
             # Get contour paths - compatible with older matplotlib versions
@@ -655,7 +704,15 @@ class LcarsTopoMap(LcarsWidget):
         filtered_segments = 0
         
         # Create a separate surface for contours with transparency
-        contour_surf = pygame.Surface((x_end - x_start, y_end - y_start), pygame.SRCALPHA)
+        # If we downsampled, create at downsampled size and scale up
+        if downsample_factor > 1:
+            contour_surf = pygame.Surface(
+                (patch_display.shape[1], patch_display.shape[0]), 
+                pygame.SRCALPHA
+            )
+        else:
+            contour_surf = pygame.Surface((x_end - x_start, y_end - y_start), pygame.SRCALPHA)
+        
         contour_surf.fill((0, 0, 0, 0))  # Fully transparent
         
         # Draw contours with adaptive filtering
@@ -674,6 +731,13 @@ class LcarsTopoMap(LcarsWidget):
                         # Yellow contour lines (LCARS style) on transparent surface
                         pygame.draw.lines(contour_surf, (255, 255, 0, 255), False, segment_list, 1)
         
+        # Scale up contours if we downsampled
+        if downsample_factor > 1:
+            contour_surf = pygame.transform.smoothscale(
+                contour_surf,
+                (x_end - x_start, y_end - y_start)
+            )
+        
         # Blit contours on top of elevation colors
         surf.blit(contour_surf, (0, 0))
         
@@ -685,7 +749,8 @@ class LcarsTopoMap(LcarsWidget):
             'total_paths': total_segments,
             'filtered': filtered_segments,
             'elev_min': patch_min if patch_range > 0 else 0,
-            'elev_max': patch_max if patch_range > 0 else 0
+            'elev_max': patch_max if patch_range > 0 else 0,
+            'downsample': downsample_factor  # Track for display
         }
         
         return surf, offset_x, offset_y, stats
@@ -814,6 +879,151 @@ class LcarsTopoMap(LcarsWidget):
             
             lon += lon_spacing
     
+    def _draw_scale_ruler(self, surface):
+        """
+        Draw a scale ruler at the bottom of the map showing distance
+        
+        Displays a horizontal bar with distance markings (feet/miles)
+        based on the current zoom level and geographic bounds.
+        """
+        if self.lat_min is None or self.lon_min is None:
+            return  # No geographic bounds available
+        
+        # Calculate meters per pixel at current zoom level
+        # Use the center latitude for more accurate calculation
+        center_lat = (self.lat_min + self.lat_max) / 2
+        
+        # Approximate meters per degree at this latitude
+        # 1 degree longitude varies with latitude: 111320 * cos(lat) meters
+        # 1 degree latitude is constant: ~111320 meters
+        meters_per_degree_lon = 111320 * np.cos(np.radians(center_lat))
+        meters_per_degree_lat = 111320
+        
+        # Calculate meters per pixel in the DEM data
+        lon_range = self.lon_max - self.lon_min
+        lat_range = self.lat_max - self.lat_min
+        
+        meters_per_pixel_x = (lon_range * meters_per_degree_lon) / self.dem_width
+        meters_per_pixel_y = (lat_range * meters_per_degree_lat) / self.dem_height
+        
+        # Use average for scale calculation
+        meters_per_pixel = (meters_per_pixel_x + meters_per_pixel_y) / 2
+        
+        # Account for current zoom level
+        meters_per_screen_pixel = meters_per_pixel / self.zoom
+        
+        # Determine appropriate ruler length and units
+        # We want the ruler to be between 100-200 pixels long
+        target_pixels = 150
+        target_meters = target_pixels * meters_per_screen_pixel
+        
+        # Convert to feet
+        feet_per_meter = 3.28084
+        target_feet = target_meters * feet_per_meter
+        
+        # Choose nice round numbers for ruler
+        if target_feet < 100:
+            # Use feet
+            ruler_values = [10, 25, 50, 100]
+            unit = "ft"
+        elif target_feet < 1000:
+            # Use feet (hundreds)
+            ruler_values = [100, 250, 500, 1000]
+            unit = "ft"
+        elif target_feet < 5280:
+            # Use feet (thousands)
+            ruler_values = [1000, 2000, 5000]
+            unit = "ft"
+        else:
+            # Use miles
+            target_miles = target_feet / 5280
+            if target_miles < 1:
+                ruler_values = [0.25, 0.5, 1.0]
+            elif target_miles < 5:
+                ruler_values = [1, 2, 5]
+            elif target_miles < 10:
+                ruler_values = [2, 5, 10]
+            elif target_miles < 25:
+                ruler_values = [5, 10, 25]
+            elif target_miles < 100:
+                ruler_values = [10, 25, 50, 100]
+            else:
+                ruler_values = [25, 50, 100, 200]
+            unit = "mi"
+            # Convert back to feet for calculation
+            ruler_values = [v * 5280 for v in ruler_values]
+        
+        # Find best ruler value
+        best_value = ruler_values[0]
+        for value in ruler_values:
+            pixels = (value / feet_per_meter) / meters_per_screen_pixel
+            if 100 <= pixels <= 250:
+                best_value = value
+                break
+        
+        # Calculate ruler pixel length
+        ruler_feet = best_value
+        ruler_meters = ruler_feet / feet_per_meter
+        ruler_pixels = int(ruler_meters / meters_per_screen_pixel)
+        
+        # Draw ruler at bottom center
+        ruler_y = self.display_height - 50
+        ruler_x_start = (self.display_width - ruler_pixels) // 2
+        ruler_x_end = ruler_x_start + ruler_pixels
+        
+        # Draw ruler bar (LCARS orange)
+        ruler_color = (255, 153, 0)
+        bar_height = 8
+        
+        # Main horizontal bar
+        pygame.draw.rect(surface, ruler_color,
+                        (ruler_x_start, ruler_y, ruler_pixels, bar_height))
+        
+        # End caps (vertical lines)
+        pygame.draw.line(surface, ruler_color,
+                        (ruler_x_start, ruler_y - 5),
+                        (ruler_x_start, ruler_y + bar_height + 5), 3)
+        pygame.draw.line(surface, ruler_color,
+                        (ruler_x_end, ruler_y - 5),
+                        (ruler_x_end, ruler_y + bar_height + 5), 3)
+        
+        # Mid-point marker
+        mid_x = (ruler_x_start + ruler_x_end) // 2
+        pygame.draw.line(surface, ruler_color,
+                        (mid_x, ruler_y - 3),
+                        (mid_x, ruler_y + bar_height + 3), 2)
+        
+        # Label
+        font = pygame.font.Font("assets/swiss911.ttf", 18)
+        
+        # Format label text
+        if unit == "mi":
+            label_value = ruler_feet / 5280
+            if label_value < 1:
+                label_text = "{:.2f} {}".format(label_value, unit)
+            elif label_value < 10:
+                label_text = "{:.1f} {}".format(label_value, unit)
+            else:
+                label_text = "{:.0f} {}".format(label_value, unit)
+        else:
+            label_text = "{:.0f} {}".format(ruler_feet, unit)
+        
+        text_surface = font.render(label_text, True, ruler_color)
+        text_rect = text_surface.get_rect(center=(
+            (ruler_x_start + ruler_x_end) // 2,
+            ruler_y + bar_height + 20
+        ))
+        
+        # Background for text
+        bg_rect = text_rect.inflate(10, 4)
+        bg_surf = pygame.Surface((bg_rect.width, bg_rect.height))
+        bg_surf.set_alpha(200)
+        bg_surf.fill((0, 0, 0))
+        surface.blit(bg_surf, bg_rect)
+        
+        # Draw text
+        surface.blit(text_surface, text_rect)
+    
     def _draw_elevation_marker(self, surface):
         """
         Draw elevation marker at clicked location
@@ -922,6 +1132,13 @@ class LcarsTopoMap(LcarsWidget):
             ), text_color)
         ]
         
+        # Add downsample info if downsampling is active
+        downsample = self.stats.get('downsample', 1)
+        if downsample > 1:
+            info_lines.append(
+                ("DEM: 1/{}x resolution".format(downsample), text_color)
+            )
+        
         # Add elevation range if available
         if 'elev_min' in self.stats and 'elev_max' in self.stats:
             elev_min = self.stats['elev_min']
@@ -1009,6 +1226,9 @@ class LcarsTopoMap(LcarsWidget):
         
         # Draw lat/lon grid AFTER contours (on top)
         self._draw_latlon_grid(self.image)
+        
+        # Draw scale ruler at bottom
+        self._draw_scale_ruler(self.image)
         
         # Draw elevation marker if user has clicked
         self._draw_elevation_marker(self.image)
