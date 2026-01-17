@@ -140,8 +140,8 @@ class ScreenMain(LcarsScreen):
         self.current_scan_start_freq = None
         self.current_scan_end_freq = None
         
-        # Topographical map pan speed
-        self.topo_pan_speed = 15
+        # Topographical map pan speed - INCREASED from 15 to 50
+        self.topo_pan_speed = 50
 
     def update(self, screenSurface, fpsClock):
         if pygame.time.get_ticks() - self.lastClockUpdate > 1000:
@@ -372,11 +372,16 @@ class ScreenMain(LcarsScreen):
         self.microscope_file_list.set_lines(lines)
             
     def scanHandler(self, item, event, clock):
-        """SCAN: Start wide spectrum survey with frequency selection"""
+        """SCAN: Start wide spectrum survey with frequency selection OR zoom in on topo map"""
         
+        # Geospatial mode: Zoom in on clicked location
         if self.dashboard.visible or self.topo_map.visible:
-            # In geospatial mode, SCAN button does nothing (or could trigger GPS update)
-            print("SCAN: GPS position update (not implemented yet)")
+            if self.topo_map.visible:
+                # Zoom in on the clicked location
+                self.topo_map.zoom_in_on_clicked()
+            else:
+                # On static dashboard, do nothing (or could switch to topo map)
+                print("SCAN: Switch to topo map for zoom features")
             return
             
         if self.microscope_gadget.visible:
@@ -537,15 +542,14 @@ class ScreenMain(LcarsScreen):
         
             
     def analyzeHandler(self, item, event, clock):
-        """ANALYZE: Start/stop live waterfall scan OR review microscope images"""
+        """ANALYZE: Start/stop live waterfall scan OR review microscope images OR zoom out on topo map"""
         
-        # Geospatial mode: Toggle between static dashboard and topo map
+        # Geospatial mode: Zoom out on clicked location
         if self.topo_map.visible:
-            print("ANALYZE: Switching to static dashboard")
-            self.topo_map.visible = False
-            self.dashboard.visible = True
+            self.topo_map.zoom_out_on_clicked()
             return
         elif self.dashboard.visible:
+            # On static dashboard, switch to topo map
             print("ANALYZE: Switching to topo map")
             self.dashboard.visible = False
             self.topo_map.visible = True
@@ -643,9 +647,9 @@ class ScreenMain(LcarsScreen):
         self._handleMicroscopeNavigation(review_index=-1)
                        
     def navHandlerLeft(self, item, event, clock):
-        # Topo map: Pan west
+        # Topo map: Pan west - FIXED: now uses positive dx to pan left
         if self.topo_map.visible:
-            self.topo_map.pan(-self.topo_pan_speed, 0)
+            self.topo_map.pan(self.topo_pan_speed, 0)
             return
         
         # Waterfall: decrease frequency
@@ -659,9 +663,9 @@ class ScreenMain(LcarsScreen):
             self.emf_gadget.target_frequency -= 1
                           
     def navHandlerRight(self, item, event, clock):
-        # Topo map: Pan east
+        # Topo map: Pan east - FIXED: now uses negative dx to pan right
         if self.topo_map.visible:
-            self.topo_map.pan(self.topo_pan_speed, 0)
+            self.topo_map.pan(-self.topo_pan_speed, 0)
             return
         
         # Waterfall: increase frequency
@@ -724,17 +728,20 @@ class ScreenMain(LcarsScreen):
         self.microscope_file_list.set_lines([
             "GEOSPATIAL MODE",
             "",
-            "Navigation:",
-            "  WASD: Pan map",
-            "  Up/Down: Zoom",
+            "Click on map to",
+            "show elevation",
             "",
-            "Actions:",
-            "  ANALYZE: Toggle",
-            "    topo/static",
-            "  RECORD: Save",
-            "    waypoint (TBD)",
-            "  SCAN: GPS update",
-            "    (TBD)"
+            "Navigation:",
+            "  D-pad: Pan map",
+            "",
+            "Zoom:",
+            "  SCAN: Zoom IN",
+            "    on clicked point",
+            "  ANALYZE: Zoom OUT",
+            "    on clicked point",
+            "",
+            "RECORD: Save",
+            "  waypoint (TBD)"
         ])
 
     def microscopeHandler(self, item, event, clock):
