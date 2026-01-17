@@ -5,6 +5,8 @@ import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 from ui.widgets.sprite import LcarsWidget
+import re
+import os
 
 
 class LcarsTopoMap(LcarsWidget):
@@ -15,6 +17,8 @@ class LcarsTopoMap(LcarsWidget):
     Supports panning and zooming with intelligent contour caching.
     
     Uses PIL/Pillow to load GeoTIFF files - no special geospatial libraries needed!
+    
+    NEW: Includes latitude/longitude markers based on USGS file naming convention
     """
     
     # Constants for contour generation
@@ -46,6 +50,12 @@ class LcarsTopoMap(LcarsWidget):
         self.dem_height = 0
         self.dem_file_path = dem_file_path
         
+        # Georeferencing data (extracted from filename)
+        self.lat_min = None
+        self.lat_max = None
+        self.lon_min = None
+        self.lon_max = None
+        
         # Camera/view state
         self.cam_x = 0
         self.cam_y = 0
@@ -67,9 +77,70 @@ class LcarsTopoMap(LcarsWidget):
         self.gps_lon = None
         self.gps_enabled = False
         
+        # Click-to-show-elevation feature
+        self.clicked_lat = None
+        self.clicked_lon = None
+        self.clicked_elevation = None
+        self.clicked_screen_x = None
+        self.clicked_screen_y = None
+        
+        # Zoom levels for SCAN/ANALYZE buttons
+        self.zoom_levels = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0]
+        self.current_zoom_index = 2  # Start at 1.5x (index 2)
+        
         # Load DEM data if path provided
         if dem_file_path:
             self.load_dem(dem_file_path)
+    
+    def _parse_usgs_filename(self, filename):
+        """
+        Parse USGS DEM filename to extract geographic bounds
+        
+        Format: USGS_<resolution>_n<lat>w<lon>_<date>.tif
+        Example: USGS_13_n38w078_20211220.tif
+        
+        USGS Convention: n38w078 means the tile covers the area from:
+        - Latitude: 37°N to 38°N (the number indicates the NORTH edge)
+        - Longitude: 78°W to 77°W (the number indicates the WEST edge)
+        
+        Returns:
+            tuple: (lat_min, lat_max, lon_min, lon_max) or None if parsing fails
+        """
+        try:
+            # Extract just the filename without path
+            basename = os.path.basename(filename)
+            
+            # Parse using regex
+            # Pattern: USGS_<resolution>_n<lat>w<lon>_<date>
+            pattern = r'USGS_\d+_n(\d+)w(\d+)_\d+\.tif'
+            match = re.match(pattern, basename, re.IGNORECASE)
+            
+            if match:
+                lat_north = int(match.group(1))
+                lon_west = int(match.group(2))
+                
+                # USGS naming convention (CORRECTED):
+                # n38w078 means the NW corner is at 38°N, 78°W
+                # The tile covers 1 degree south and 1 degree east from there
+                lat_min = lat_north - 1  # One degree south
+                lat_max = lat_north
+                lon_min = -lon_west      # Western hemisphere is negative
+                lon_max = -lon_west + 1  # One degree east
+                
+                print("Parsed geographic bounds from filename:")
+                print("  Latitude:  {:.3f}°N to {:.3f}°N".format(lat_min, lat_max))
+                print("  Longitude: {:.3f}°W to {:.3f}°W".format(
+                    abs(lon_max), abs(lon_min)))
+                
+                return lat_min, lat_max, lon_min, lon_max
+            else:
+                print("Warning: Filename does not match USGS pattern")
+                print("  Expected format: USGS_##_n##w###_########.tif")
+                return None
+                
+        except Exception as e:
+            print("Error parsing USGS filename: {}".format(e))
+            return None
     
     def load_dem(self, file_path):
         """
@@ -85,6 +156,14 @@ class LcarsTopoMap(LcarsWidget):
             from PIL import Image
             
             print("Loading DEM file: {}".format(file_path))
+            
+            # Parse geographic bounds from filename
+            bounds = self._parse_usgs_filename(file_path)
+            if bounds:
+                self.lat_min, self.lat_max, self.lon_min, self.lon_max = bounds
+            else:
+                print("Warning: Could not determine geographic bounds")
+                print("  Lat/lon labels will not be displayed")
             
             # Increase PIL's decompression bomb limit for large DEMs
             # Default is 178,956,970 pixels, we'll increase to 500M for USGS DEMs
@@ -153,10 +232,20 @@ class LcarsTopoMap(LcarsWidget):
             
             self.dem_file_path = file_path
             
-            # Center the view on the middle of the DEM
-            # Camera position is negative of the center point (viewport coordinates)
-            self.cam_x = -self.dem_width / 2
-            self.cam_y = -self.dem_height / 2
+            # Center the view on Powhatan, Virginia (37.5277°N, 77.4710°W)
+            # Convert lat/lon to pixel coordinates
+            target_coords = self._latlon_to_pixel(37.5277, -77.4710)
+            if target_coords:
+                pixel_x, pixel_y = target_coords
+                # Camera position is negative of the center point (viewport coordinates)
+                self.cam_x = -pixel_x
+                self.cam_y = -pixel_y
+                print("Centered view on Powhatan, VA: 37.5277°N, 77.4710°W")
+            else:
+                # Fallback to center of DEM if coordinate conversion fails
+                self.cam_x = -self.dem_width / 2
+                self.cam_y = -self.dem_height / 2
+                print("Centered view on DEM center (coordinate conversion unavailable)")
             
             # Start zoomed in for better detail (but not too much)
             # Zoom of 1.5 = good balance of overview and detail
@@ -182,6 +271,82 @@ class LcarsTopoMap(LcarsWidget):
             traceback.print_exc()
             return False
     
+    def _pixel_to_latlon(self, pixel_x, pixel_y):
+        """
+        Convert pixel coordinates to latitude/longitude
+        
+        Args:
+            pixel_x: X coordinate in DEM pixel space (0 to dem_width)
+            pixel_y: Y coordinate in DEM pixel space (0 to dem_height)
+            
+        Returns:
+            tuple: (latitude, longitude) in decimal degrees, or None if no bounds
+        """
+        if self.lat_min is None or self.lon_min is None:
+            return None
+        
+        # Calculate ratios (0.0 to 1.0)
+        x_ratio = pixel_x / self.dem_width
+        y_ratio = pixel_y / self.dem_height
+        
+        # Interpolate lat/lon
+        # Note: Y axis is inverted in image coordinates (0 = top = north)
+        lon = self.lon_min + x_ratio * (self.lon_max - self.lon_min)
+        lat = self.lat_max - y_ratio * (self.lat_max - self.lat_min)
+        
+        return lat, lon
+    
+    def _latlon_to_pixel(self, lat, lon):
+        """
+        Convert latitude/longitude to pixel coordinates
+        
+        Args:
+            lat: Latitude in decimal degrees
+            lon: Longitude in decimal degrees
+            
+        Returns:
+            tuple: (pixel_x, pixel_y) or None if no bounds
+        """
+        if self.lat_min is None or self.lon_min is None:
+            return None
+        
+        # Calculate ratios
+        x_ratio = (lon - self.lon_min) / (self.lon_max - self.lon_min)
+        y_ratio = (self.lat_max - lat) / (self.lat_max - self.lat_min)
+        
+        # Convert to pixel coordinates
+        pixel_x = x_ratio * self.dem_width
+        pixel_y = y_ratio * self.dem_height
+        
+        return pixel_x, pixel_y
+    
+    def _get_elevation_at_pixel(self, pixel_x, pixel_y):
+        """
+        Get elevation value at a specific pixel coordinate
+        
+        Args:
+            pixel_x: X coordinate in DEM pixel space
+            pixel_y: Y coordinate in DEM pixel space
+            
+        Returns:
+            float: Elevation in meters, or None if out of bounds
+        """
+        if self.dem_data is None:
+            return None
+        
+        # Clamp to valid range
+        pixel_x = int(round(pixel_x))
+        pixel_y = int(round(pixel_y))
+        
+        if pixel_x < 0 or pixel_x >= self.dem_width:
+            return None
+        if pixel_y < 0 or pixel_y >= self.dem_height:
+            return None
+        
+        # Return elevation value
+        # Note: Y axis is inverted in image coordinates
+        return float(self.dem_data[pixel_y, pixel_x])
+    
     def set_gps_position(self, lat, lon):
         """
         Set GPS position for map centering (future enhancement)
@@ -194,8 +359,14 @@ class LcarsTopoMap(LcarsWidget):
         self.gps_lon = lon
         self.gps_enabled = True
         
-        # TODO: Convert lat/lon to pixel coordinates in DEM
-        # This requires knowing the DEM's georeferencing info
+        # Convert to pixel coordinates and center view
+        coords = self._latlon_to_pixel(lat, lon)
+        if coords:
+            pixel_x, pixel_y = coords
+            # Center camera on GPS position
+            self.cam_x = -pixel_x
+            self.cam_y = -pixel_y
+            print("Centered map on GPS: {:.6f}°, {:.6f}°".format(lat, lon))
     
     def pan(self, dx, dy):
         """
@@ -215,6 +386,84 @@ class LcarsTopoMap(LcarsWidget):
     def zoom_out(self, factor=0.95):
         """Zoom out by given factor"""
         self.zoom = max(0.1, self.zoom * factor)
+    
+    def zoom_in_on_clicked(self):
+        """
+        Zoom in centered on the clicked location (SCAN button)
+        
+        If no location is clicked, does nothing.
+        Steps through predefined zoom levels.
+        """
+        if self.clicked_lat is None or self.clicked_lon is None:
+            print("No location selected - click on map first")
+            return False
+        
+        # Move to next zoom level
+        if self.current_zoom_index < len(self.zoom_levels) - 1:
+            self.current_zoom_index += 1
+            target_zoom = self.zoom_levels[self.current_zoom_index]
+            
+            # Get pixel coordinates of clicked location
+            pixel_coords = self._latlon_to_pixel(self.clicked_lat, self.clicked_lon)
+            if not pixel_coords:
+                return False
+            
+            pixel_x, pixel_y = pixel_coords
+            
+            # Center camera on clicked location
+            # Camera position is negative of the point we want centered
+            # Plus half the viewport size (in world coordinates)
+            self.cam_x = -pixel_x + (self.display_width / target_zoom) / 2
+            self.cam_y = -pixel_y + (self.display_height / target_zoom) / 2
+            
+            # Set zoom
+            self.zoom = target_zoom
+            
+            print("Zoomed IN to {:.1f}x on {:.5f}°N, {:.5f}°W".format(
+                self.zoom, self.clicked_lat, abs(self.clicked_lon)))
+            
+            return True
+        else:
+            print("Already at maximum zoom ({:.1f}x)".format(self.zoom))
+            return False
+    
+    def zoom_out_on_clicked(self):
+        """
+        Zoom out centered on the clicked location (ANALYZE button)
+        
+        If no location is clicked, does nothing.
+        Steps through predefined zoom levels.
+        """
+        if self.clicked_lat is None or self.clicked_lon is None:
+            print("No location selected - click on map first")
+            return False
+        
+        # Move to previous zoom level
+        if self.current_zoom_index > 0:
+            self.current_zoom_index -= 1
+            target_zoom = self.zoom_levels[self.current_zoom_index]
+            
+            # Get pixel coordinates of clicked location
+            pixel_coords = self._latlon_to_pixel(self.clicked_lat, self.clicked_lon)
+            if not pixel_coords:
+                return False
+            
+            pixel_x, pixel_y = pixel_coords
+            
+            # Center camera on clicked location
+            self.cam_x = -pixel_x + (self.display_width / target_zoom) / 2
+            self.cam_y = -pixel_y + (self.display_height / target_zoom) / 2
+            
+            # Set zoom
+            self.zoom = target_zoom
+            
+            print("Zoomed OUT to {:.1f}x on {:.5f}°N, {:.5f}°W".format(
+                self.zoom, self.clicked_lat, abs(self.clicked_lon)))
+            
+            return True
+        else:
+            print("Already at minimum zoom ({:.1f}x)".format(self.zoom))
+            return False
     
     def adjust_sensitivity(self, delta):
         """
@@ -453,6 +702,203 @@ class LcarsTopoMap(LcarsWidget):
         
         return cam_moved or zoom_changed or threshold_changed
     
+    def _draw_latlon_grid(self, surface):
+        """
+        Draw latitude/longitude grid lines and labels
+        
+        This draws a coordinate grid overlay on the map based on the
+        geographic bounds extracted from the USGS filename.
+        """
+        if self.lat_min is None or self.lon_min is None:
+            return  # No geographic bounds available
+        
+        font = pygame.font.Font("assets/swiss911.ttf", 16)
+        
+        # LCARS color scheme
+        grid_color = (153, 153, 255, 128)  # Semi-transparent light blue
+        label_color = (255, 255, 0)  # Yellow for labels
+        
+        # Calculate visible bounds in lat/lon
+        # Get corners of visible area in pixel coordinates
+        visible_x_min = max(0, int(-self.cam_x))
+        visible_y_min = max(0, int(-self.cam_y))
+        visible_x_max = min(self.dem_width, int(-self.cam_x + self.display_width / self.zoom))
+        visible_y_max = min(self.dem_height, int(-self.cam_y + self.display_height / self.zoom))
+        
+        # Convert to lat/lon
+        nw_coords = self._pixel_to_latlon(visible_x_min, visible_y_min)
+        se_coords = self._pixel_to_latlon(visible_x_max, visible_y_max)
+        
+        if not nw_coords or not se_coords:
+            return
+        
+        lat_north, lon_west = nw_coords
+        lat_south, lon_east = se_coords
+        
+        # Determine appropriate grid spacing based on zoom level
+        # More zoom = finer grid
+        lat_range = abs(lat_north - lat_south)
+        lon_range = abs(lon_east - lon_west)
+        
+        # Choose grid spacing (degrees)
+        if lat_range > 0.5:
+            lat_spacing = 0.25  # 15 arc-minutes
+            lon_spacing = 0.25
+        elif lat_range > 0.2:
+            lat_spacing = 0.1  # 6 arc-minutes
+            lon_spacing = 0.1
+        elif lat_range > 0.05:
+            lat_spacing = 0.05  # 3 arc-minutes
+            lon_spacing = 0.05
+        else:
+            lat_spacing = 0.01  # 36 arc-seconds
+            lon_spacing = 0.01
+        
+        # Draw latitude lines (horizontal)
+        lat = np.ceil(lat_south / lat_spacing) * lat_spacing
+        while lat <= lat_north:
+            # Convert lat to pixel Y coordinate
+            pixel_coords = self._latlon_to_pixel(lat, (lon_west + lon_east) / 2)
+            if pixel_coords:
+                pixel_x, pixel_y = pixel_coords
+                # Convert to screen coordinates
+                screen_y = int((pixel_y + self.cam_y) * self.zoom)
+                
+                if 0 <= screen_y < self.display_height:
+                    # Draw grid line
+                    pygame.draw.line(surface, grid_color, 
+                                   (0, screen_y), 
+                                   (self.display_width, screen_y), 1)
+                    
+                    # Draw label on left edge
+                    label = "{:.3f}°N".format(lat) if lat >= 0 else "{:.3f}°S".format(abs(lat))
+                    text = font.render(label, True, label_color)
+                    
+                    # Background for text
+                    bg_rect = text.get_rect(topleft=(5, screen_y - 10))
+                    bg_surf = pygame.Surface((bg_rect.width + 6, bg_rect.height + 4))
+                    bg_surf.set_alpha(180)
+                    bg_surf.fill((0, 0, 0))
+                    surface.blit(bg_surf, (3, screen_y - 12))
+                    surface.blit(text, (5, screen_y - 10))
+            
+            lat += lat_spacing
+        
+        # Draw longitude lines (vertical)
+        lon = np.ceil(lon_west / lon_spacing) * lon_spacing
+        while lon <= lon_east:
+            # Convert lon to pixel X coordinate
+            pixel_coords = self._latlon_to_pixel((lat_north + lat_south) / 2, lon)
+            if pixel_coords:
+                pixel_x, pixel_y = pixel_coords
+                # Convert to screen coordinates
+                screen_x = int((pixel_x + self.cam_x) * self.zoom)
+                
+                if 0 <= screen_x < self.display_width:
+                    # Draw grid line
+                    pygame.draw.line(surface, grid_color,
+                                   (screen_x, 0),
+                                   (screen_x, self.display_height), 1)
+                    
+                    # Draw label on bottom edge
+                    label = "{:.3f}°W".format(abs(lon)) if lon < 0 else "{:.3f}°E".format(lon)
+                    text = font.render(label, True, label_color)
+                    
+                    # Background for text
+                    bg_rect = text.get_rect(bottomleft=(screen_x + 5, self.display_height - 5))
+                    bg_surf = pygame.Surface((bg_rect.width + 6, bg_rect.height + 4))
+                    bg_surf.set_alpha(180)
+                    bg_surf.fill((0, 0, 0))
+                    surface.blit(bg_surf, (screen_x + 3, self.display_height - bg_rect.height - 7))
+                    surface.blit(text, (screen_x + 5, self.display_height - bg_rect.height - 5))
+            
+            lon += lon_spacing
+    
+    def _draw_elevation_marker(self, surface):
+        """
+        Draw elevation marker at clicked location
+        
+        Shows a crosshair and elevation value where the user clicked
+        """
+        if self.clicked_lat is None or self.clicked_lon is None:
+            return
+        
+        # Convert clicked lat/lon to current screen coordinates
+        pixel_coords = self._latlon_to_pixel(self.clicked_lat, self.clicked_lon)
+        if not pixel_coords:
+            return
+        
+        pixel_x, pixel_y = pixel_coords
+        screen_x = int((pixel_x + self.cam_x) * self.zoom)
+        screen_y = int((pixel_y + self.cam_y) * self.zoom)
+        
+        # Only draw if in visible area
+        if not (0 <= screen_x < self.display_width and 0 <= screen_y < self.display_height):
+            return
+        
+        # Draw orange crosshair (LCARS style)
+        cross_size = 12
+        cross_color = (255, 153, 0)  # LCARS orange
+        
+        # Draw crosshair
+        pygame.draw.line(surface, cross_color,
+                        (screen_x - cross_size, screen_y),
+                        (screen_x + cross_size, screen_y), 2)
+        pygame.draw.line(surface, cross_color,
+                        (screen_x, screen_y - cross_size),
+                        (screen_x, screen_y + cross_size), 2)
+        
+        # Draw circle around crosshair
+        pygame.draw.circle(surface, cross_color,
+                         (screen_x, screen_y), cross_size, 2)
+        
+        # Draw elevation label
+        if self.clicked_elevation is not None:
+            font = pygame.font.Font("assets/swiss911.ttf", 18)
+            
+            # Format elevation text
+            elev_text = "Elevation: {:.1f}m ({:.0f}ft)".format(
+                self.clicked_elevation,
+                self.clicked_elevation * 3.28084  # Convert to feet
+            )
+            
+            # Add coordinate text
+            coord_text = "{:.5f}°N, {:.5f}°W".format(
+                self.clicked_lat,
+                abs(self.clicked_lon)
+            )
+            
+            # Render text
+            elev_surface = font.render(elev_text, True, (255, 153, 0))
+            coord_surface = font.render(coord_text, True, (153, 153, 255))
+            
+            # Position label near crosshair (offset to avoid obscuring the point)
+            label_x = screen_x + cross_size + 10
+            label_y = screen_y - cross_size - 10
+            
+            # Adjust if too close to edge
+            if label_x + elev_surface.get_width() > self.display_width - 10:
+                label_x = screen_x - cross_size - elev_surface.get_width() - 10
+            if label_y < 10:
+                label_y = screen_y + cross_size + 10
+            
+            # Draw background box
+            box_width = max(elev_surface.get_width(), coord_surface.get_width()) + 10
+            box_height = elev_surface.get_height() + coord_surface.get_height() + 10
+            
+            bg_surf = pygame.Surface((box_width, box_height))
+            bg_surf.set_alpha(200)
+            bg_surf.fill((0, 0, 0))
+            surface.blit(bg_surf, (label_x - 5, label_y - 5))
+            
+            # Draw border
+            pygame.draw.rect(surface, (255, 153, 0),
+                           (label_x - 5, label_y - 5, box_width, box_height), 2)
+            
+            # Draw text
+            surface.blit(elev_surface, (label_x, label_y))
+            surface.blit(coord_surface, (label_x, label_y + elev_surface.get_height() + 2))
+    
     def _draw_info_overlay(self, surface):
         """Draw information overlay with map stats"""
         if not self.stats:
@@ -484,6 +930,19 @@ class LcarsTopoMap(LcarsWidget):
                 info_lines.append(
                     ("Elevation: {:.0f} - {:.0f}m".format(elev_min, elev_max), text_color)
                 )
+        
+        # Add current center coordinates if available
+        if self.lat_min is not None:
+            # Calculate center of visible area
+            center_x = -self.cam_x + (self.display_width / self.zoom) / 2
+            center_y = -self.cam_y + (self.display_height / self.zoom) / 2
+            center_coords = self._pixel_to_latlon(center_x, center_y)
+            
+            if center_coords:
+                lat, lon = center_coords
+                coord_text = "Center: {:.5f}°N, {:.5f}°W".format(
+                    lat, abs(lon))
+                info_lines.append((coord_text, text_color))
         
         y_pos = 10
         for line_text, color in info_lines:
@@ -548,13 +1007,39 @@ class LcarsTopoMap(LcarsWidget):
                           (int(self.cached_offset_x * self.zoom),
                            int(self.cached_offset_y * self.zoom)))
         
+        # Draw lat/lon grid AFTER contours (on top)
+        self._draw_latlon_grid(self.image)
+        
+        # Draw elevation marker if user has clicked
+        self._draw_elevation_marker(self.image)
+        
         # Draw info overlay
         self._draw_info_overlay(self.image)
         
         # Draw GPS marker if enabled (future)
         if self.gps_enabled and self.gps_lat and self.gps_lon:
-            # TODO: Draw GPS position marker
-            pass
+            # Convert GPS to pixel coordinates
+            gps_pixel = self._latlon_to_pixel(self.gps_lat, self.gps_lon)
+            if gps_pixel:
+                pixel_x, pixel_y = gps_pixel
+                # Convert to screen coordinates
+                screen_x = int((pixel_x + self.cam_x) * self.zoom)
+                screen_y = int((pixel_y + self.cam_y) * self.zoom)
+                
+                # Draw GPS crosshair if in visible area
+                if 0 <= screen_x < self.display_width and 0 <= screen_y < self.display_height:
+                    # Draw red crosshair
+                    cross_size = 15
+                    pygame.draw.line(self.image, (255, 0, 0),
+                                   (screen_x - cross_size, screen_y),
+                                   (screen_x + cross_size, screen_y), 3)
+                    pygame.draw.line(self.image, (255, 0, 0),
+                                   (screen_x, screen_y - cross_size),
+                                   (screen_x, screen_y + cross_size), 3)
+                    
+                    # Draw circle around crosshair
+                    pygame.draw.circle(self.image, (255, 0, 0),
+                                     (screen_x, screen_y), cross_size, 2)
         
         # Blit to screen
         screen.blit(self.image, self.rect)
@@ -562,10 +1047,45 @@ class LcarsTopoMap(LcarsWidget):
         self.dirty = 0
     
     def handleEvent(self, event, clock):
-        """Handle events (reserved for future touch/click interactions)"""
+        """Handle mouse clicks to show elevation at clicked location"""
         if not self.visible:
             return False
         
-        # Future: handle clicks to place waypoints, etc.
+        # Handle mouse clicks
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:  # Left click
+            if self.rect.collidepoint(event.pos):
+                # Convert screen coordinates to widget-relative coordinates
+                x_rel = event.pos[0] - self.rect.left
+                y_rel = event.pos[1] - self.rect.top
+                
+                # Convert to DEM pixel coordinates
+                pixel_x = (x_rel / self.zoom) - self.cam_x
+                pixel_y = (y_rel / self.zoom) - self.cam_y
+                
+                # Get lat/lon at this location
+                coords = self._pixel_to_latlon(pixel_x, pixel_y)
+                if coords:
+                    lat, lon = coords
+                    
+                    # Get elevation at this pixel
+                    elevation = self._get_elevation_at_pixel(pixel_x, pixel_y)
+                    
+                    # Store for rendering
+                    self.clicked_lat = lat
+                    self.clicked_lon = lon
+                    self.clicked_elevation = elevation
+                    self.clicked_screen_x = x_rel
+                    self.clicked_screen_y = y_rel
+                    
+                    # Print to console
+                    if elevation is not None:
+                        print("Clicked location: {:.5f}°N, {:.5f}°W".format(lat, abs(lon)))
+                        print("  Elevation: {:.1f}m ({:.0f}ft)".format(
+                            elevation, elevation * 3.28084))
+                    else:
+                        print("Clicked location: {:.5f}°N, {:.5f}°W (no elevation data)".format(
+                            lat, abs(lon)))
+                    
+                    return True
         
         return False
