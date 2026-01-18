@@ -282,9 +282,13 @@ class ScreenMain(LcarsScreen):
         """Stop FM demodulation if active"""
         self.demodulator.stop_demodulation()
     
-    def _adjust_waterfall_bandwidth(self, direction):
-        """Adjust waterfall bandwidth and restart live scan"""
-        self.waterfall_display.adjust_bandwidth(direction)
+    def _adjust_waterfall_filter_width(self, direction):
+        """Adjust waterfall filter width (for fine-tuning frequency selection)
+        
+        Args:
+            direction: 1 for increase, -1 for decrease
+        """
+        self.waterfall_display.adjust_filter_width(direction)
     
     def _adjust_waterfall_frequency(self, direction):
         """Adjust waterfall center frequency"""
@@ -412,7 +416,12 @@ class ScreenMain(LcarsScreen):
     
     def _updateDemodulationInfo(self, frequency_hz):
         """Update text display with demodulation protocol info"""
-        lines = self.demodulator.get_demodulation_info(frequency_hz)
+        # Get current filter width from waterfall if available
+        filter_width = None
+        if self.waterfall_display.visible:
+            filter_width = self.waterfall_display.get_filter_width()
+        
+        lines = self.demodulator.get_demodulation_info(frequency_hz, filter_width)
         self.microscope_file_list.set_lines(lines)
     
     def _update_geospatial_mode_menu(self):
@@ -677,6 +686,11 @@ class ScreenMain(LcarsScreen):
         if target_freq is not None:
             target_freq_hz = int(target_freq * 1e6)
             
+            # Get current filter width from waterfall
+            filter_width = None
+            if self.waterfall_display.visible:
+                filter_width = self.waterfall_display.get_filter_width()
+            
             if self.demodulator.is_active():
                 self._stop_fm_demodulation()
                 self._updateDemodulationInfo(target_freq_hz)
@@ -687,7 +701,7 @@ class ScreenMain(LcarsScreen):
                     self.waterfall_display.start_scan(target_freq_hz)
                     print("Live waterfall scan restarted at {:.3f} MHz".format(target_freq))
             else:
-                self.demodulator.start_demodulation(target_freq_hz)
+                self.demodulator.start_demodulation(target_freq_hz, filter_width)
                 self._updateDemodulationInfo(target_freq_hz)
                 
                 if self.waterfall_display.visible:
@@ -771,8 +785,9 @@ class ScreenMain(LcarsScreen):
                 self._stop_fm_demodulation()
             
        
-    # Navigation handlers - NOW WITH MAP SUPPORT (topo and geological)
+    # Navigation handlers - NOW WITH FILTER WIDTH CONTROL (not bandwidth)
     def navHandlerUp(self, item, event, clock):
+        """Navigation Up: Pan north (map) OR increase filter width (waterfall)"""
         # Map pan: Pan north
         if self.topo_map.visible or self.dashboard.visible or self.geological_map.visible:
             current_widget = self.geospatial_modes[self.current_geospatial_mode]['widget']
@@ -780,15 +795,16 @@ class ScreenMain(LcarsScreen):
                 current_widget.pan(0, self.topo_pan_speed)
             return
         
-        # Waterfall: increase bandwidth
+        # Waterfall: INCREASE FILTER WIDTH (changed from bandwidth)
         if self.waterfall_display.visible and self.waterfall_display.scan_active:
-            self._adjust_waterfall_bandwidth(1)
+            self._adjust_waterfall_filter_width(1)
             return
         
         # Microscope navigation
         self._handleMicroscopeNavigation(review_index=0)
             
     def navHandlerDown(self, item, event, clock):
+        """Navigation Down: Pan south (map) OR decrease filter width (waterfall)"""
         # Map pan: Pan south
         if self.topo_map.visible or self.dashboard.visible or self.geological_map.visible:
             current_widget = self.geospatial_modes[self.current_geospatial_mode]['widget']
@@ -796,9 +812,9 @@ class ScreenMain(LcarsScreen):
                 current_widget.pan(0, -self.topo_pan_speed)
             return
         
-        # Waterfall: decrease bandwidth
+        # Waterfall: DECREASE FILTER WIDTH (changed from bandwidth)
         if self.waterfall_display.visible and self.waterfall_display.scan_active:
-            self._adjust_waterfall_bandwidth(-1)
+            self._adjust_waterfall_filter_width(-1)
             return
         
         # Microscope navigation
