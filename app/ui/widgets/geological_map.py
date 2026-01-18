@@ -115,6 +115,7 @@ class LcarsGeologicalMap(LcarsWidget):
         
         # Color cache for geological units
         self.unit_colors = {}
+        self.unit_age_cache = {}  # Cache mapping unit name to age name
         
         # Click-to-show-info feature
         self.clicked_lat = None
@@ -172,6 +173,17 @@ class LcarsGeologicalMap(LcarsWidget):
             self.lat_max = data_lat_max
             self.lon_min = data_lon_min
             self.lon_max = data_lon_max
+            
+            # Build age cache for color mapping
+            print("Building age-based color cache...")
+            self.unit_age_cache = {}
+            for _, row in self.gdf.iterrows():
+                unit_name = row.get('MapUnit', 'Unknown')
+                age_name = row.get('Age', 'Unknown')
+                if unit_name and unit_name != 'Unknown':
+                    self.unit_age_cache[unit_name] = age_name
+            
+            print("Cached ages for {} units".format(len(self.unit_age_cache)))
             
             # CRITICAL: Set virtual pixel dimensions based on aspect ratio
             # Maintain same aspect ratio as geographic bounds
@@ -264,9 +276,16 @@ class LcarsGeologicalMap(LcarsWidget):
     
     def _get_unit_color(self, unit):
         """
-        Get consistent color for a geological unit
+        Get color for a geological unit based on age (pastel spectrum)
         
-        Uses hash-based color generation for consistency
+        Uses age-based color gradient:
+        - Oldest rocks (4600 Ma): Deep purple/violet
+        - Ancient (2000 Ma): Blue
+        - Old (1000 Ma): Cyan
+        - Middle (500 Ma): Green
+        - Younger (250 Ma): Yellow
+        - Recent (100 Ma): Orange
+        - Youngest (0 Ma): Pink/red
         
         Args:
             unit: Unit name/identifier
@@ -275,14 +294,142 @@ class LcarsGeologicalMap(LcarsWidget):
             tuple: (R, G, B) color
         """
         if unit not in self.unit_colors:
-            u = str(unit)
-            # Generate color based on hash (reproducible)
-            r = hash(u) % 150 + 100
-            g = hash(u + "g") % 150 + 100
-            b = hash(u + "b") % 150 + 100
-            self.unit_colors[unit] = (r, g, b)
+            # Try to determine age from the cached clicked_age or look it up
+            age_ma = None
+            
+            # If this is the unit we have data for, use it
+            if hasattr(self, 'unit_age_cache') and unit in self.unit_age_cache:
+                age_name = self.unit_age_cache[unit]
+                age_ma = self._get_age_midpoint(age_name)
+            
+            # If we couldn't determine age, use neutral gray
+            if age_ma is None:
+                # Fallback to hash-based pastel for unknown ages
+                u = str(unit)
+                r = hash(u) % 80 + 150  # Lighter range (150-230)
+                g = hash(u + "g") % 80 + 150
+                b = hash(u + "b") % 80 + 150
+                self.unit_colors[unit] = (r, g, b)
+            else:
+                # Map age to color spectrum
+                self.unit_colors[unit] = self._age_to_pastel_color(age_ma)
         
         return self.unit_colors[unit]
+    
+    def _get_age_midpoint(self, age_name):
+        """
+        Get the midpoint age in Ma for a given geological age name
+        
+        Args:
+            age_name: Name of geological age/period
+            
+        Returns:
+            float: Midpoint age in millions of years, or None if unknown
+        """
+        if not age_name or age_name == 'Unknown':
+            return None
+        
+        # Try exact match
+        age_key = age_name.strip()
+        if age_key in self.GEOLOGICAL_AGES:
+            start_ma, end_ma, era = self.GEOLOGICAL_AGES[age_key]
+            return (start_ma + end_ma) / 2
+        
+        # Try partial match
+        for known_age in self.GEOLOGICAL_AGES.keys():
+            if known_age.lower() in age_key.lower():
+                start_ma, end_ma, era = self.GEOLOGICAL_AGES[known_age]
+                return (start_ma + end_ma) / 2
+        
+        return None
+    
+    def _age_to_pastel_color(self, age_ma):
+        """
+        Convert geological age to pastel color on spectrum
+        
+        Color spectrum (pastel/light tones):
+        - 4600+ Ma (Hadean): Deep violet (180, 140, 200)
+        - 3000 Ma (Archean): Purple-blue (160, 160, 220)
+        - 2000 Ma (Proterozoic): Blue (140, 180, 230)
+        - 1000 Ma (Neoproterozoic): Cyan (140, 220, 220)
+        - 500 Ma (Cambrian): Green (160, 220, 180)
+        - 250 Ma (Triassic): Yellow-green (200, 230, 160)
+        - 100 Ma (Cretaceous): Yellow-orange (240, 220, 160)
+        - 50 Ma (Eocene): Orange (240, 190, 160)
+        - 10 Ma (Miocene): Pink-orange (240, 170, 180)
+        - 0 Ma (Present): Pink-red (230, 160, 180)
+        
+        Args:
+            age_ma: Age in millions of years
+            
+        Returns:
+            tuple: (R, G, B) pastel color
+        """
+        import colorsys
+        
+        # Use logarithmic scale for better color distribution
+        # Map 0-4600 Ma to 0-1 using log scale
+        if age_ma <= 0:
+            ratio = 0.0
+        elif age_ma >= 4600:
+            ratio = 1.0
+        else:
+            # Logarithmic mapping emphasizes younger ages
+            import math
+            # Add 1 to avoid log(0), scale to log(4601)
+            ratio = math.log10(age_ma + 1) / math.log10(4601)
+        
+        # Define color spectrum using HSV for smooth transitions
+        # We'll go from pink/red (0°) through the spectrum back to violet (280°)
+        # Reverse the ratio so oldest = violet, youngest = pink/red
+        
+        if ratio < 0.1:
+            # 0-10 Ma: Pink-red to orange (HSV: 350° to 20°)
+            hue = 350 + (ratio / 0.1) * 30
+            hue = hue / 360.0
+            saturation = 0.35  # Pastel
+            value = 0.95  # Light
+            
+        elif ratio < 0.3:
+            # 10-100 Ma: Orange to yellow (HSV: 20° to 50°)
+            local_ratio = (ratio - 0.1) / 0.2
+            hue = (20 + local_ratio * 30) / 360.0
+            saturation = 0.30
+            value = 0.95
+            
+        elif ratio < 0.5:
+            # 100-500 Ma: Yellow to green (HSV: 50° to 120°)
+            local_ratio = (ratio - 0.3) / 0.2
+            hue = (50 + local_ratio * 70) / 360.0
+            saturation = 0.30
+            value = 0.90
+            
+        elif ratio < 0.7:
+            # 500-2000 Ma: Green to cyan (HSV: 120° to 180°)
+            local_ratio = (ratio - 0.5) / 0.2
+            hue = (120 + local_ratio * 60) / 360.0
+            saturation = 0.35
+            value = 0.88
+            
+        elif ratio < 0.85:
+            # 2000-3500 Ma: Cyan to blue (HSV: 180° to 220°)
+            local_ratio = (ratio - 0.7) / 0.15
+            hue = (180 + local_ratio * 40) / 360.0
+            saturation = 0.38
+            value = 0.88
+            
+        else:
+            # 3500+ Ma: Blue to violet (HSV: 220° to 280°)
+            local_ratio = (ratio - 0.85) / 0.15
+            hue = (220 + local_ratio * 60) / 360.0
+            saturation = 0.35
+            value = 0.85
+        
+        # Convert HSV to RGB
+        r, g, b = colorsys.hsv_to_rgb(hue, saturation, value)
+        
+        # Convert to 0-255 range
+        return (int(r * 255), int(g * 255), int(b * 255))
     
     def _format_age_detail(self, age_name):
         """
@@ -907,7 +1054,7 @@ class LcarsGeologicalMap(LcarsWidget):
         surface.blit(text_surface, text_rect)
     
     def _draw_info_overlay(self, surface):
-        """Draw information overlay with map stats"""
+        """Draw information overlay with map stats and age spectrum legend"""
         font = pygame.font.Font("assets/swiss911.ttf", 18)
         
         # LCARS colors
@@ -944,6 +1091,74 @@ class LcarsGeologicalMap(LcarsWidget):
             
             surface.blit(text, (10, y_pos))
             y_pos += 25
+        
+        # Draw age spectrum legend
+        self._draw_age_legend(surface)
+    
+    def _draw_age_legend(self, surface):
+        """Draw age spectrum color legend on right side of screen"""
+        # Legend dimensions
+        legend_width = 30
+        legend_height = 200
+        legend_x = self.display_width - legend_width - 15
+        legend_y = 10
+        
+        font_small = pygame.font.Font("assets/swiss911.ttf", 12)
+        
+        # Draw background
+        bg_surf = pygame.Surface((legend_width + 70, legend_height + 40))
+        bg_surf.set_alpha(180)
+        bg_surf.fill((0, 0, 0))
+        surface.blit(bg_surf, (legend_x - 10, legend_y - 5))
+        
+        # Draw border
+        pygame.draw.rect(surface, (255, 153, 0),
+                        (legend_x - 10, legend_y - 5, legend_width + 70, legend_height + 40), 2)
+        
+        # Title
+        title_text = font_small.render("AGE", True, (255, 255, 0))
+        surface.blit(title_text, (legend_x + 5, legend_y))
+        
+        # Draw color gradient bar
+        for i in range(legend_height):
+            # Map pixel position to age (logarithmic)
+            ratio = i / legend_height
+            
+            # Convert ratio back to approximate age for color lookup
+            # Using same log scale as color mapping
+            import math
+            age_ma = (10 ** (ratio * math.log10(4601))) - 1
+            age_ma = max(0, min(4600, age_ma))
+            
+            # Get color for this age
+            color = self._age_to_pastel_color(age_ma)
+            
+            # Draw horizontal line
+            pygame.draw.line(surface, color,
+                           (legend_x, legend_y + 20 + i),
+                           (legend_x + legend_width, legend_y + 20 + i), 1)
+        
+        # Draw age labels at key points
+        age_labels = [
+            (0, "0 Ma"),
+            (0.15, "50 Ma"),
+            (0.35, "250 Ma"),
+            (0.55, "1000 Ma"),
+            (0.75, "2500 Ma"),
+            (0.95, "4600 Ma"),
+        ]
+        
+        for ratio, label in age_labels:
+            y = legend_y + 20 + int(ratio * legend_height)
+            
+            # Draw tick mark
+            pygame.draw.line(surface, (255, 255, 0),
+                           (legend_x + legend_width, y),
+                           (legend_x + legend_width + 5, y), 2)
+            
+            # Draw label
+            label_text = font_small.render(label, True, (255, 255, 0))
+            surface.blit(label_text, (legend_x + legend_width + 8, y - 6))
     
     def update(self, screen):
         """Update and render the geological map"""
