@@ -197,7 +197,7 @@ class ScreenMain(LcarsScreen):
                     self.emf_gadget.emf_scanning = False
                     self.frequency_selector.clear_scanning_range()
                     try:
-                        loaded_image = pygame.image.load("/home/tricorder/rpi_lcars-master/spectrum.png")
+                        loaded_image = pygame.image.load("/tmp/spectrum.png")
                         scaled_image = pygame.transform.scale(loaded_image, self.scan_display_size)
                         self.emf.spectrum_image = scaled_image
                         self.spectrum_scan_display.set_spectrum_image(scaled_image)
@@ -215,7 +215,7 @@ class ScreenMain(LcarsScreen):
                 if current_time - self.last_spectrum_check > 500:
                     self.last_spectrum_check = current_time
                     try:
-                        progress_files = glob.glob("/home/tricorder/rpi_lcars-master/spectrum_progress_*.png")
+                        progress_files = glob.glob("/tmp/spectrum_progress_*.png")
                         
                         if progress_files:
                             latest_file = max(progress_files, key=os.path.getmtime)
@@ -228,8 +228,8 @@ class ScreenMain(LcarsScreen):
                                 self.emf.last_spectrum_file = latest_file
                                 print("Loaded spectrum update: {}".format(latest_file))
                         else:
-                            if os.path.exists("/home/tricorder/rpi_lcars-master/spectrum.png"):
-                                self.emf.spectrum_image = pygame.image.load("/home/tricorder/rpi_lcars-master/spectrum.png")
+                            if os.path.exists("/tmp/spectrum.png"):
+                                self.emf.spectrum_image = pygame.image.load("/tmp/spectrum.png")
                                 
                     except (pygame.error, IOError, OSError) as e:
                         pass
@@ -242,9 +242,9 @@ class ScreenMain(LcarsScreen):
             if current_time - self.last_waterfall_check > 100:
                 self.last_waterfall_check = current_time
                 try:
-                    waterfall_data = np.load("/home/tricorder/rpi_lcars-master/spectrum_live_waterfall.npy")
-                    psd_data = np.load("/home/tricorder/rpi_lcars-master/spectrum_live_psd.npy")
-                    frequencies = np.load("/home/tricorder/rpi_lcars-master/spectrum_live_frequencies.npy")
+                    waterfall_data = np.load("/tmp/spectrum_live_waterfall.npy")
+                    psd_data = np.load("/tmp/spectrum_live_psd.npy")
+                    frequencies = np.load("/tmp/spectrum_live_frequencies.npy")
                     
                     self.waterfall_display.set_data(waterfall_data, psd_data, frequencies)
                     
