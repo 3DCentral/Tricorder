@@ -118,7 +118,7 @@ class ScreenMain(LcarsScreen):
         
         # Store DEM and GeoJSON file paths for lazy loading
         self.dem_file_path = "assets/usgs/USGS_13_n38w078_20211220.tif"
-        self.geojson_file_path = "assets/usgs/va_geology_37_38.geojson"
+        self.geojson_file_path = "assets/geology/va_geology_37_38.geojson"
 
         self.weather = LcarsImage("assets/atmosph.png", (187, 299))
         self.weather.visible = False
@@ -309,7 +309,8 @@ class ScreenMain(LcarsScreen):
         self.microscope_gadget.visible = False
         self.spectral_gadget.visible = False
         self.dashboard.visible = False
-        self.topo_map.visible = False  # NEW: Hide topo map
+        self.topo_map.visible = False
+        self.geological_map.visible = False  # NEW: Hide geological map
         self.weather.visible = False
         self.waterfall_display.visible = False
         self.frequency_selector.visible = False
@@ -381,7 +382,7 @@ class ScreenMain(LcarsScreen):
                         self._loadMicroscopeImage()
                 
                 # In geospatial mode - switch map mode
-                elif self.topo_map.visible or self.dashboard.visible:
+                elif self.topo_map.visible or self.dashboard.visible or self.geological_map.visible:
                     # Calculate which mode was clicked
                     # Mode menu format: "GEOSPATIAL MODES", "", then 3 lines per mode
                     selected_line = self.microscope_file_list.selected_index
@@ -448,10 +449,26 @@ class ScreenMain(LcarsScreen):
             print("Mode '{}' not yet implemented".format(new_mode['name']))
             return
         
-        # Hide current mode widget
+        # Hide current mode widget and save its view state
         current_widget = self.geospatial_modes[self.current_geospatial_mode]['widget']
         if current_widget:
             current_widget.visible = False
+            
+            # Save current view state (center location and zoom)
+            saved_lat = None
+            saved_lon = None
+            saved_zoom_index = None
+            
+            # Get view center - works for both topo and geological maps
+            if hasattr(current_widget, 'get_view_center'):
+                saved_lat, saved_lon = current_widget.get_view_center()
+            elif hasattr(current_widget, 'clicked_lat') and current_widget.clicked_lat:
+                # Fallback to clicked location if available
+                saved_lat = current_widget.clicked_lat
+                saved_lon = current_widget.clicked_lon
+            
+            if hasattr(current_widget, 'current_zoom_index'):
+                saved_zoom_index = current_widget.current_zoom_index
         
         # Lazy load data for new mode if needed
         new_widget = new_mode['widget']
@@ -470,26 +487,50 @@ class ScreenMain(LcarsScreen):
             else:
                 print("Geological data file not found: {}".format(self.geojson_file_path))
         
+        # Synchronize view state to new mode
+        if new_widget and saved_lat is not None and saved_zoom_index is not None:
+            # Use the new set_view_from_center method for clean synchronization
+            if hasattr(new_widget, 'set_view_from_center'):
+                new_widget.set_view_from_center(saved_lat, saved_lon, saved_zoom_index)
+                print("Synchronized view: center at ({:.4f}, {:.4f}), zoom index {}".format(
+                    saved_lat, saved_lon, saved_zoom_index))
+            else:
+                # Fallback for widgets without the method
+                if hasattr(new_widget, 'clicked_lat'):
+                    new_widget.clicked_lat = saved_lat
+                    new_widget.clicked_lon = saved_lon
+                if hasattr(new_widget, 'current_zoom_index'):
+                    new_widget.current_zoom_index = saved_zoom_index
+                    if hasattr(new_widget, 'zoom_levels'):
+                        new_widget.zoom = new_widget.zoom_levels[saved_zoom_index]
+                if hasattr(new_widget, '_center_on_location'):
+                    new_widget._center_on_location(saved_lat, saved_lon)
+            
+            # Invalidate cache
+            if hasattr(new_widget, 'cached_surface'):
+                new_widget.cached_surface = None
+        
         # Show new mode widget
         self.current_geospatial_mode = mode_index
         if new_widget:
             new_widget.visible = True
         
-        print("Switched to geospatial mode: {}".format(
-            self.geospatial_modes[mode_index]['name']))
+        print("Switched to geospatial mode: {} at zoom {:.1f}x".format(
+            self.geospatial_modes[mode_index]['name'],
+            new_widget.zoom if new_widget else 1.0))
         
         # Update menu
         self._update_geospatial_mode_menu()
             
     def scanHandler(self, item, event, clock):
-        """SCAN: Start wide spectrum survey with frequency selection OR zoom in on topo map"""
+        """SCAN: Start wide spectrum survey with frequency selection OR zoom in on map"""
         
         # Geospatial mode: Zoom in on clicked location
-        if self.dashboard.visible or self.topo_map.visible:
+        if self.dashboard.visible or self.topo_map.visible or self.geological_map.visible:
             # Get current mode widget
             current_widget = self.geospatial_modes[self.current_geospatial_mode]['widget']
             
-            # Zoom in if widget supports it (currently only topo_map)
+            # Zoom in if widget supports it
             if current_widget and hasattr(current_widget, 'zoom_in_on_clicked'):
                 current_widget.zoom_in_on_clicked()
             else:
@@ -593,7 +634,7 @@ class ScreenMain(LcarsScreen):
         """RECORD: Save screenshot, analyze, or demodulate FM"""
         
         # Geospatial mode: Save waypoint (future)
-        if self.topo_map.visible:
+        if self.topo_map.visible or self.geological_map.visible:
             print("RECORD: Waypoint saved (not implemented yet)")
             # TODO: Save current map center as waypoint
             return
@@ -654,14 +695,14 @@ class ScreenMain(LcarsScreen):
         
             
     def analyzeHandler(self, item, event, clock):
-        """ANALYZE: Start/stop live waterfall scan OR review microscope images OR zoom out on topo map"""
+        """ANALYZE: Start/stop live waterfall scan OR review microscope images OR zoom out on map"""
         
         # Geospatial mode: Zoom out on clicked location
-        if self.topo_map.visible or self.dashboard.visible:
+        if self.topo_map.visible or self.dashboard.visible or self.geological_map.visible:
             # Get current mode widget
             current_widget = self.geospatial_modes[self.current_geospatial_mode]['widget']
             
-            # Zoom out if widget supports it (currently only topo_map)
+            # Zoom out if widget supports it
             if current_widget and hasattr(current_widget, 'zoom_out_on_clicked'):
                 current_widget.zoom_out_on_clicked()
             else:
@@ -730,10 +771,10 @@ class ScreenMain(LcarsScreen):
                 self._stop_fm_demodulation()
             
        
-    # Navigation handlers - NOW WITH TOPO MAP SUPPORT
+    # Navigation handlers - NOW WITH MAP SUPPORT (topo and geological)
     def navHandlerUp(self, item, event, clock):
-        # Topo map: Pan north
-        if self.topo_map.visible or self.dashboard.visible:
+        # Map pan: Pan north
+        if self.topo_map.visible or self.dashboard.visible or self.geological_map.visible:
             current_widget = self.geospatial_modes[self.current_geospatial_mode]['widget']
             if current_widget and hasattr(current_widget, 'pan'):
                 current_widget.pan(0, self.topo_pan_speed)
@@ -748,8 +789,8 @@ class ScreenMain(LcarsScreen):
         self._handleMicroscopeNavigation(review_index=0)
             
     def navHandlerDown(self, item, event, clock):
-        # Topo map: Pan south
-        if self.topo_map.visible or self.dashboard.visible:
+        # Map pan: Pan south
+        if self.topo_map.visible or self.dashboard.visible or self.geological_map.visible:
             current_widget = self.geospatial_modes[self.current_geospatial_mode]['widget']
             if current_widget and hasattr(current_widget, 'pan'):
                 current_widget.pan(0, -self.topo_pan_speed)
@@ -764,8 +805,8 @@ class ScreenMain(LcarsScreen):
         self._handleMicroscopeNavigation(review_index=-1)
                        
     def navHandlerLeft(self, item, event, clock):
-        # Topo map: Pan west - FIXED: now uses positive dx to pan left
-        if self.topo_map.visible or self.dashboard.visible:
+        # Map pan: Pan west
+        if self.topo_map.visible or self.dashboard.visible or self.geological_map.visible:
             current_widget = self.geospatial_modes[self.current_geospatial_mode]['widget']
             if current_widget and hasattr(current_widget, 'pan'):
                 current_widget.pan(self.topo_pan_speed, 0)
@@ -782,11 +823,12 @@ class ScreenMain(LcarsScreen):
             self.emf_gadget.target_frequency -= 1
                           
     def navHandlerRight(self, item, event, clock):
-        # Topo map: Pan east - FIXED: now uses negative dx to pan right
-        if self.topo_map.visible or self.dashboard.visible:
+        # Map pan: Pan east
+        if self.topo_map.visible or self.dashboard.visible or self.geological_map.visible:
             current_widget = self.geospatial_modes[self.current_geospatial_mode]['widget']
             if current_widget and hasattr(current_widget, 'pan'):
                 current_widget.pan(-self.topo_pan_speed, 0)
+            return
             return
         
         # Waterfall: increase frequency
