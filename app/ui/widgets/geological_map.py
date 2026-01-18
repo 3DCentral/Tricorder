@@ -1,4 +1,7 @@
-"""Geological map widget for displaying rock formations from GeoJSON data"""
+"""Geological map widget for displaying rock formations from GeoJSON data
+
+FIXED VERSION: Properly synchronizes with topographical map using same zoom/coordinate system
+"""
 import pygame
 import numpy as np
 from ui.widgets.sprite import LcarsWidget
@@ -13,7 +16,7 @@ class LcarsGeologicalMap(LcarsWidget):
     Displays rock formations and geological units from GeoJSON data.
     Supports panning and zooming with spatial indexing for performance.
     
-    Uses geopandas for efficient geospatial queries and rendering.
+    CRITICAL: Uses SAME coordinate system as topographical map for proper synchronization
     """
     
     def __init__(self, pos, size=(640, 480), geojson_file=None):
@@ -44,16 +47,16 @@ class LcarsGeologicalMap(LcarsWidget):
         self.lon_min = -78.0
         self.lon_max = -77.0
         
-        # Camera/view state
-        self.cam_x = 0
-        self.cam_y = 0
-        self.zoom = 1.0
+        # CRITICAL FIX: Use same coordinate system as topographical map
+        # Create a virtual "pixel space" that matches the DEM dimensions
+        # This ensures zoom levels and coordinates are directly comparable
+        self.virtual_width = 4096  # Match topographical map's reference size
+        self.virtual_height = 4096
         
-        # View bounds in lat/lon (what the camera is currently looking at)
-        self.view_min_lon = self.lon_min
-        self.view_max_lon = self.lon_max
-        self.view_min_lat = self.lat_min
-        self.view_max_lat = self.lat_max
+        # Camera/view state - MUST match topographical map exactly
+        self.cam_x = 0  # Camera X in virtual pixel space
+        self.cam_y = 0  # Camera Y in virtual pixel space
+        self.zoom = 1.0  # Zoom level (same meaning as topo map)
         
         # Color cache for geological units
         self.unit_colors = {}
@@ -70,7 +73,8 @@ class LcarsGeologicalMap(LcarsWidget):
         
         # Cached rendering for performance
         self.cached_surface = None
-        self.cache_view_bounds = None
+        self.cache_cam_x = None
+        self.cache_cam_y = None
         self.cache_zoom = None
         
         # Load GeoJSON data if path provided
@@ -114,17 +118,34 @@ class LcarsGeologicalMap(LcarsWidget):
             self.lon_min = data_lon_min
             self.lon_max = data_lon_max
             
-            # Initialize view to full data extent
-            self.view_min_lon = self.lon_min
-            self.view_max_lon = self.lon_max
-            self.view_min_lat = self.lat_min
-            self.view_max_lat = self.lat_max
+            # CRITICAL: Set virtual pixel dimensions based on aspect ratio
+            # Maintain same aspect ratio as geographic bounds
+            lat_range = self.lat_max - self.lat_min
+            lon_range = self.lon_max - self.lon_min
+            aspect_ratio = lon_range / lat_range
             
-            # Update view to center on Powhatan, VA (37.5277°N, 77.4710°W)
-            # Start at 1.0x zoom
-            self.zoom = 1.0
-            self.current_zoom_index = 5  # 1.0x in zoom_levels array
-            self._center_on_location(37.5277, -77.4710)
+            # Use 4096 as base (matches topo map reference)
+            if aspect_ratio > 1:
+                # Wider than tall
+                self.virtual_width = 4096
+                self.virtual_height = int(4096 / aspect_ratio)
+            else:
+                # Taller than wide
+                self.virtual_height = 4096
+                self.virtual_width = int(4096 * aspect_ratio)
+            
+            print("Virtual pixel space: {}x{} (aspect ratio: {:.3f})".format(
+                self.virtual_width, self.virtual_height, aspect_ratio))
+            
+            # Initialize view to center on Powhatan, VA (37.5277°N, 77.4710°W)
+            # This MUST use the same method as topographical map
+            pixel_coords = self._latlon_to_pixel(37.5277, -77.4710)
+            if pixel_coords:
+                pixel_x, pixel_y = pixel_coords
+                # Camera position is negative of the center point
+                self.cam_x = -pixel_x
+                self.cam_y = -pixel_y
+                print("Centered view on Powhatan, VA")
             
             return True
             
@@ -133,6 +154,58 @@ class LcarsGeologicalMap(LcarsWidget):
             import traceback
             traceback.print_exc()
             return False
+    
+    def _latlon_to_pixel(self, lat, lon):
+        """
+        Convert latitude/longitude to virtual pixel coordinates
+        
+        CRITICAL: This MUST match the topographical map's coordinate system
+        
+        Args:
+            lat: Latitude in decimal degrees
+            lon: Longitude in decimal degrees
+            
+        Returns:
+            tuple: (pixel_x, pixel_y) in virtual pixel space
+        """
+        if self.lat_min is None or self.lon_min is None:
+            return None
+        
+        # Calculate ratios within geographic bounds
+        x_ratio = (lon - self.lon_min) / (self.lon_max - self.lon_min)
+        y_ratio = (self.lat_max - lat) / (self.lat_max - self.lat_min)  # Y inverted
+        
+        # Convert to virtual pixel coordinates
+        pixel_x = x_ratio * self.virtual_width
+        pixel_y = y_ratio * self.virtual_height
+        
+        return pixel_x, pixel_y
+    
+    def _pixel_to_latlon(self, pixel_x, pixel_y):
+        """
+        Convert virtual pixel coordinates to latitude/longitude
+        
+        CRITICAL: This MUST match the topographical map's coordinate system
+        
+        Args:
+            pixel_x: X coordinate in virtual pixel space
+            pixel_y: Y coordinate in virtual pixel space
+            
+        Returns:
+            tuple: (latitude, longitude) in decimal degrees
+        """
+        if self.lat_min is None or self.lon_min is None:
+            return None
+        
+        # Calculate ratios (0.0 to 1.0)
+        x_ratio = pixel_x / self.virtual_width
+        y_ratio = pixel_y / self.virtual_height
+        
+        # Interpolate lat/lon (Y axis is inverted in image coordinates)
+        lon = self.lon_min + x_ratio * (self.lon_max - self.lon_min)
+        lat = self.lat_max - y_ratio * (self.lat_max - self.lat_min)
+        
+        return lat, lon
     
     def _get_unit_color(self, unit):
         """
@@ -156,161 +229,112 @@ class LcarsGeologicalMap(LcarsWidget):
         
         return self.unit_colors[unit]
     
-    def _latlon_to_screen(self, lon, lat):
+    def _pixel_to_screen(self, pixel_x, pixel_y):
         """
-        Convert lat/lon to screen pixel coordinates
+        Convert virtual pixel coordinates to screen coordinates
         
-        Maintains proper aspect ratio to prevent squishing.
+        CRITICAL: This MUST match the topographical map's rendering
         
         Args:
-            lon: Longitude
-            lat: Latitude
+            pixel_x: X in virtual pixel space
+            pixel_y: Y in virtual pixel space
             
         Returns:
-            tuple: (x, y) screen coordinates
+            tuple: (screen_x, screen_y)
         """
-        # Calculate position within current view bounds
-        x_ratio = (lon - self.view_min_lon) / (self.view_max_lon - self.view_min_lon)
-        y_ratio = (lat - self.view_min_lat) / (self.view_max_lat - self.view_min_lat)
+        # Apply camera and zoom (same as topo map)
+        screen_x = int((pixel_x + self.cam_x) * self.zoom)
+        screen_y = int((pixel_y + self.cam_y) * self.zoom)
         
-        # Convert to screen coordinates (Y is inverted)
-        x = int(x_ratio * self.display_width)
-        y = int(self.display_height - (y_ratio * self.display_height))
-        
-        return x, y
+        return screen_x, screen_y
     
-    def _screen_to_latlon(self, x, y):
+    def _screen_to_pixel(self, screen_x, screen_y):
         """
-        Convert screen pixel coordinates to lat/lon
+        Convert screen coordinates to virtual pixel coordinates
         
         Args:
-            x: Screen X coordinate
-            y: Screen Y coordinate
+            screen_x: Screen X coordinate
+            screen_y: Screen Y coordinate
             
         Returns:
-            tuple: (lon, lat)
+            tuple: (pixel_x, pixel_y)
         """
-        # Calculate ratio within screen
-        x_ratio = x / self.display_width
-        y_ratio = (self.display_height - y) / self.display_height
+        # Reverse camera and zoom
+        pixel_x = (screen_x / self.zoom) - self.cam_x
+        pixel_y = (screen_y / self.zoom) - self.cam_y
         
-        # Convert to lat/lon
-        lon = self.view_min_lon + x_ratio * (self.view_max_lon - self.view_min_lon)
-        lat = self.view_min_lat + y_ratio * (self.view_max_lat - self.view_min_lat)
-        
-        return lon, lat
-    
-    def _center_on_location(self, lat, lon):
-        """
-        Center view on a specific lat/lon location
-        
-        Maintains proper aspect ratio based on screen dimensions.
-        Matches topographical map's zoom behavior.
-        
-        Args:
-            lat: Latitude
-            lon: Longitude
-        """
-        # Calculate the full data extent
-        full_lon_span = self.lon_max - self.lon_min
-        full_lat_span = self.lat_max - self.lat_min
-        
-        # CRITICAL FIX: To match topographical map's zoom behavior,
-        # we need to define what "1.0x zoom" means.
-        # 
-        # For topographical map: zoom 1.0 means the DEM (4096 pixels) fits in viewport
-        # For geological map: we want the same ground coverage
-        #
-        # The topo map downsamples to max 4096 pixels, so we use that as reference
-        
-        REFERENCE_PIXELS = 4096.0
-        
-        # At zoom 1.0, we want to show the fraction of data that would
-        # fit on screen if the full extent were 4096 pixels wide/tall
-        
-        base_lon_span = full_lon_span * (self.display_width / REFERENCE_PIXELS)
-        base_lat_span = full_lat_span * (self.display_height / REFERENCE_PIXELS)
-        
-        # Apply zoom factor
-        lon_span = base_lon_span / self.zoom
-        lat_span = base_lat_span / self.zoom
-        
-        # Calculate aspect ratios for final adjustment
-        data_aspect = full_lon_span / full_lat_span
-        screen_aspect = self.display_width / self.display_height
-        
-        # Maintain aspect ratio
-        if data_aspect > screen_aspect:
-            # Data is wider - adjust latitude span
-            lat_span = lon_span / screen_aspect
-        else:
-            # Data is taller - adjust longitude span  
-            lon_span = lat_span * screen_aspect
-        
-        # Center on location
-        self.view_min_lon = lon - lon_span / 2
-        self.view_max_lon = lon + lon_span / 2
-        self.view_min_lat = lat - lat_span / 2
-        self.view_max_lat = lat + lat_span / 2
+        return pixel_x, pixel_y
     
     def get_view_center(self):
         """
-        Get the current center of the view
+        Get the current center of the view in lat/lon
+        
+        CRITICAL: Must match topographical map's method
         
         Returns:
             tuple: (lat, lon) of view center
         """
-        center_lat = (self.view_min_lat + self.view_max_lat) / 2
-        center_lon = (self.view_min_lon + self.view_max_lon) / 2
-        return center_lat, center_lon
+        # Calculate center pixel in screen coordinates
+        center_screen_x = self.display_width / 2
+        center_screen_y = self.display_height / 2
+        
+        # Convert to virtual pixel coordinates
+        center_pixel_x, center_pixel_y = self._screen_to_pixel(center_screen_x, center_screen_y)
+        
+        # Convert to lat/lon
+        coords = self._pixel_to_latlon(center_pixel_x, center_pixel_y)
+        if coords:
+            return coords
+        else:
+            # Fallback to data center
+            return (self.lat_min + self.lat_max) / 2, (self.lon_min + self.lon_max) / 2
     
     def set_view_from_center(self, lat, lon, zoom_index):
         """
         Set the view to center on a specific location with given zoom
         
+        CRITICAL: Must match topographical map's method EXACTLY
+        
         Args:
             lat: Center latitude
-            lon: Center longitude  
+            lon: Center longitude
             zoom_index: Index into zoom_levels array
         """
         self.current_zoom_index = zoom_index
         self.zoom = self.zoom_levels[zoom_index]
-        self._center_on_location(lat, lon)
-    
-    def _update_view_from_camera(self):
-        """Update view bounds based on camera position and zoom"""
-        # Calculate view span based on zoom
-        lon_span = (self.lon_max - self.lon_min) / self.zoom
-        lat_span = (self.lat_max - self.lat_min) / self.zoom
         
-        # Calculate center from camera position
-        # Camera is in pixel coordinates relative to full data bounds
-        center_lon = self.lon_min + (-self.cam_x / self.display_width) * (self.lon_max - self.lon_min)
-        center_lat = self.lat_min + (-self.cam_y / self.display_height) * (self.lat_max - self.lat_min)
+        # Convert lat/lon to virtual pixel coordinates
+        pixel_coords = self._latlon_to_pixel(lat, lon)
+        if not pixel_coords:
+            return
         
-        # Set view bounds
-        self.view_min_lon = center_lon - lon_span / 2
-        self.view_max_lon = center_lon + lon_span / 2
-        self.view_min_lat = center_lat - lat_span / 2
-        self.view_max_lat = center_lat + lat_span / 2
+        pixel_x, pixel_y = pixel_coords
+        
+        # Center camera on this location (same formula as topo map)
+        # Camera position is negative of the point we want centered
+        # Plus half the viewport size (in world coordinates)
+        self.cam_x = -pixel_x + (self.display_width / self.zoom) / 2
+        self.cam_y = -pixel_y + (self.display_height / self.zoom) / 2
+        
+        # Invalidate cache
+        self.cached_surface = None
+        
+        print("Geological map synchronized: center ({:.5f}, {:.5f}), zoom {:.1f}x".format(
+            lat, lon, self.zoom))
     
     def pan(self, dx, dy):
         """
         Pan the map view
         
+        CRITICAL: Must match topographical map's method
+        
         Args:
             dx: Horizontal pan amount (pixels)
             dy: Vertical pan amount (pixels)
         """
-        # Convert pixel movement to lat/lon movement
-        lon_per_pixel = (self.view_max_lon - self.view_min_lon) / self.display_width
-        lat_per_pixel = (self.view_max_lat - self.view_min_lat) / self.display_height
-        
-        # Update view bounds
-        self.view_min_lon -= dx * lon_per_pixel
-        self.view_max_lon -= dx * lon_per_pixel
-        self.view_min_lat += dy * lat_per_pixel  # Y is inverted
-        self.view_max_lat += dy * lat_per_pixel
+        # Same as topo map
+        self.cam_x += dx / self.zoom
+        self.cam_y += dy / self.zoom
         
         # Invalidate cache
         self.cached_surface = None
@@ -324,15 +348,28 @@ class LcarsGeologicalMap(LcarsWidget):
         # Move to next zoom level
         if self.current_zoom_index < len(self.zoom_levels) - 1:
             self.current_zoom_index += 1
-            self.zoom = self.zoom_levels[self.current_zoom_index]
+            target_zoom = self.zoom_levels[self.current_zoom_index]
             
-            # Recenter on clicked location
-            self._center_on_location(self.clicked_lat, self.clicked_lon)
+            # Get pixel coordinates of clicked location
+            pixel_coords = self._latlon_to_pixel(self.clicked_lat, self.clicked_lon)
+            if not pixel_coords:
+                return False
+            
+            pixel_x, pixel_y = pixel_coords
+            
+            # Center camera on clicked location (same as topo map)
+            self.cam_x = -pixel_x + (self.display_width / target_zoom) / 2
+            self.cam_y = -pixel_y + (self.display_height / target_zoom) / 2
+            
+            # Set zoom
+            self.zoom = target_zoom
             
             # Invalidate cache
             self.cached_surface = None
             
-            print("Zoomed IN to {:.1f}x on geological map".format(self.zoom))
+            print("Zoomed IN to {:.1f}x on {:.5f}°N, {:.5f}°W".format(
+                self.zoom, self.clicked_lat, abs(self.clicked_lon)))
+            
             return True
         else:
             print("Already at maximum zoom ({:.1f}x)".format(self.zoom))
@@ -347,27 +384,61 @@ class LcarsGeologicalMap(LcarsWidget):
         # Move to previous zoom level
         if self.current_zoom_index > 0:
             self.current_zoom_index -= 1
-            self.zoom = self.zoom_levels[self.current_zoom_index]
+            target_zoom = self.zoom_levels[self.current_zoom_index]
             
-            # Don't allow zooming out past the full data extent
-            # At zoom 1.0, we show the full extent, so don't go below that
-            if self.zoom < 1.0:
-                self.current_zoom_index += 1
-                self.zoom = self.zoom_levels[self.current_zoom_index]
-                print("Cannot zoom out past full data extent")
+            # Get pixel coordinates of clicked location
+            pixel_coords = self._latlon_to_pixel(self.clicked_lat, self.clicked_lon)
+            if not pixel_coords:
                 return False
             
-            # Recenter on clicked location
-            self._center_on_location(self.clicked_lat, self.clicked_lon)
+            pixel_x, pixel_y = pixel_coords
+            
+            # Center camera on clicked location (same as topo map)
+            self.cam_x = -pixel_x + (self.display_width / target_zoom) / 2
+            self.cam_y = -pixel_y + (self.display_height / target_zoom) / 2
+            
+            # Set zoom
+            self.zoom = target_zoom
             
             # Invalidate cache
             self.cached_surface = None
             
-            print("Zoomed OUT to {:.1f}x on geological map".format(self.zoom))
+            print("Zoomed OUT to {:.1f}x on {:.5f}°N, {:.5f}°W".format(
+                self.zoom, self.clicked_lat, abs(self.clicked_lon)))
+            
             return True
         else:
             print("Already at minimum zoom ({:.1f}x)".format(self.zoom))
             return False
+    
+    def _get_visible_bounds_latlon(self):
+        """
+        Calculate the visible geographic bounds
+        
+        Returns:
+            tuple: (lon_min, lat_min, lon_max, lat_max)
+        """
+        # Get corners of screen
+        top_left_pixel = self._screen_to_pixel(0, 0)
+        bottom_right_pixel = self._screen_to_pixel(self.display_width, self.display_height)
+        
+        # Convert to lat/lon
+        top_left_coords = self._pixel_to_latlon(top_left_pixel[0], top_left_pixel[1])
+        bottom_right_coords = self._pixel_to_latlon(bottom_right_pixel[0], bottom_right_pixel[1])
+        
+        if not top_left_coords or not bottom_right_coords:
+            return None
+        
+        lat_north, lon_west = top_left_coords
+        lat_south, lon_east = bottom_right_coords
+        
+        # Return as (min_lon, min_lat, max_lon, max_lat)
+        return (
+            min(lon_west, lon_east),
+            min(lat_north, lat_south),
+            max(lon_west, lon_east),
+            max(lat_north, lat_south)
+        )
     
     def _draw_geological_units(self, surface):
         """Draw geological units visible in current view"""
@@ -384,12 +455,15 @@ class LcarsGeologicalMap(LcarsWidget):
             surface.blit(text2, text2_rect)
             return
         
+        # Get visible bounds
+        bounds = self._get_visible_bounds_latlon()
+        if not bounds:
+            return
+        
         # Create bounding box for current view
-        view_box = box(self.view_min_lon, self.view_min_lat, 
-                       self.view_max_lon, self.view_max_lat)
+        view_box = box(bounds[0], bounds[1], bounds[2], bounds[3])
         
         # Query spatial index for visible polygons (FAST!)
-        # Compatible with older geopandas versions
         visible_ids = self.sindex.intersection(view_box.bounds)
         visible_gdf = self.gdf.iloc[list(visible_ids)]
         
@@ -409,8 +483,14 @@ class LcarsGeologicalMap(LcarsWidget):
             # Draw each polygon
             for poly in geoms:
                 # Convert exterior coordinates to screen space
-                pts = [self._latlon_to_screen(p[0], p[1]) 
-                       for p in poly.exterior.coords]
+                pts = []
+                for p in poly.exterior.coords:
+                    lon, lat = p[0], p[1]
+                    # Convert lat/lon -> virtual pixel -> screen
+                    pixel_coords = self._latlon_to_pixel(lat, lon)
+                    if pixel_coords:
+                        screen_coords = self._pixel_to_screen(pixel_coords[0], pixel_coords[1])
+                        pts.append(screen_coords)
                 
                 # Draw filled polygon
                 if len(pts) > 2:
@@ -424,8 +504,12 @@ class LcarsGeologicalMap(LcarsWidget):
         if self.clicked_lat is None or self.clicked_lon is None:
             return
         
-        # Convert to screen coordinates
-        screen_x, screen_y = self._latlon_to_screen(self.clicked_lon, self.clicked_lat)
+        # Convert clicked lat/lon to screen coordinates
+        pixel_coords = self._latlon_to_pixel(self.clicked_lat, self.clicked_lon)
+        if not pixel_coords:
+            return
+        
+        screen_x, screen_y = self._pixel_to_screen(pixel_coords[0], pixel_coords[1])
         
         # Only draw if in visible area
         if not (0 <= screen_x < self.display_width and 0 <= screen_y < self.display_height):
@@ -495,92 +579,104 @@ class LcarsGeologicalMap(LcarsWidget):
         grid_color = (153, 153, 255, 128)  # Semi-transparent light blue
         label_color = (255, 255, 0)  # Yellow for labels
         
-        # Get visible lat/lon bounds
-        lat_north = max(self.view_min_lat, self.view_max_lat)
-        lat_south = min(self.view_min_lat, self.view_max_lat)
-        lon_west = min(self.view_min_lon, self.view_max_lon)
-        lon_east = max(self.view_min_lon, self.view_max_lon)
+        # Get visible bounds
+        bounds = self._get_visible_bounds_latlon()
+        if not bounds:
+            return
         
-        # Determine appropriate grid spacing based on zoom level
+        lon_west, lat_south, lon_east, lat_north = bounds
+        
+        # Determine appropriate grid spacing based on visible area
         lat_range = abs(lat_north - lat_south)
         lon_range = abs(lon_east - lon_west)
         
         # Choose grid spacing (degrees)
         if lat_range > 0.5:
-            lat_spacing = 0.25  # 15 arc-minutes
+            lat_spacing = 0.25
             lon_spacing = 0.25
         elif lat_range > 0.2:
-            lat_spacing = 0.1  # 6 arc-minutes
+            lat_spacing = 0.1
             lon_spacing = 0.1
         elif lat_range > 0.05:
-            lat_spacing = 0.05  # 3 arc-minutes
+            lat_spacing = 0.05
             lon_spacing = 0.05
         else:
-            lat_spacing = 0.01  # 36 arc-seconds
+            lat_spacing = 0.01
             lon_spacing = 0.01
         
         # Draw latitude lines (horizontal)
         lat = np.ceil(lat_south / lat_spacing) * lat_spacing
         while lat <= lat_north:
-            # Convert lat to screen Y coordinate
-            screen_x, screen_y = self._latlon_to_screen((lon_west + lon_east) / 2, lat)
-            
-            if 0 <= screen_y < self.display_height:
-                # Draw grid line
-                pygame.draw.line(surface, grid_color, 
-                               (0, screen_y), 
-                               (self.display_width, screen_y), 1)
+            # Convert to screen coordinates
+            pixel_coords = self._latlon_to_pixel(lat, (lon_west + lon_east) / 2)
+            if pixel_coords:
+                screen_x, screen_y = self._pixel_to_screen(pixel_coords[0], pixel_coords[1])
                 
-                # Draw label on left edge
-                label = "{:.3f}°N".format(lat) if lat >= 0 else "{:.3f}°S".format(abs(lat))
-                text = font.render(label, True, label_color)
-                
-                # Background for text
-                bg_rect = text.get_rect(topleft=(5, screen_y - 10))
-                bg_surf = pygame.Surface((bg_rect.width + 6, bg_rect.height + 4))
-                bg_surf.set_alpha(180)
-                bg_surf.fill((0, 0, 0))
-                surface.blit(bg_surf, (3, screen_y - 12))
-                surface.blit(text, (5, screen_y - 10))
+                if 0 <= screen_y < self.display_height:
+                    # Draw grid line
+                    pygame.draw.line(surface, grid_color, 
+                                   (0, screen_y), 
+                                   (self.display_width, screen_y), 1)
+                    
+                    # Draw label on left edge
+                    label = "{:.3f}°N".format(lat) if lat >= 0 else "{:.3f}°S".format(abs(lat))
+                    text = font.render(label, True, label_color)
+                    
+                    # Background for text
+                    bg_rect = text.get_rect(topleft=(5, screen_y - 10))
+                    bg_surf = pygame.Surface((bg_rect.width + 6, bg_rect.height + 4))
+                    bg_surf.set_alpha(180)
+                    bg_surf.fill((0, 0, 0))
+                    surface.blit(bg_surf, (3, screen_y - 12))
+                    surface.blit(text, (5, screen_y - 10))
             
             lat += lat_spacing
         
         # Draw longitude lines (vertical)
         lon = np.ceil(lon_west / lon_spacing) * lon_spacing
         while lon <= lon_east:
-            # Convert lon to screen X coordinate
-            screen_x, screen_y = self._latlon_to_screen(lon, (lat_north + lat_south) / 2)
-            
-            if 0 <= screen_x < self.display_width:
-                # Draw grid line
-                pygame.draw.line(surface, grid_color,
-                               (screen_x, 0),
-                               (screen_x, self.display_height), 1)
+            # Convert to screen coordinates
+            pixel_coords = self._latlon_to_pixel((lat_north + lat_south) / 2, lon)
+            if pixel_coords:
+                screen_x, screen_y = self._pixel_to_screen(pixel_coords[0], pixel_coords[1])
                 
-                # Draw label on bottom edge
-                label = "{:.3f}°W".format(abs(lon)) if lon < 0 else "{:.3f}°E".format(lon)
-                text = font.render(label, True, label_color)
-                
-                # Background for text
-                bg_rect = text.get_rect(topleft=(screen_x + 3, self.display_height - 25))
-                bg_surf = pygame.Surface((bg_rect.width + 6, bg_rect.height + 4))
-                bg_surf.set_alpha(180)
-                bg_surf.fill((0, 0, 0))
-                surface.blit(bg_surf, (screen_x + 1, self.display_height - 27))
-                surface.blit(text, (screen_x + 3, self.display_height - 25))
+                if 0 <= screen_x < self.display_width:
+                    # Draw grid line
+                    pygame.draw.line(surface, grid_color,
+                                   (screen_x, 0),
+                                   (screen_x, self.display_height), 1)
+                    
+                    # Draw label on bottom edge
+                    label = "{:.3f}°W".format(abs(lon)) if lon < 0 else "{:.3f}°E".format(lon)
+                    text = font.render(label, True, label_color)
+                    
+                    # Background for text
+                    bg_rect = text.get_rect(bottomleft=(screen_x + 5, self.display_height - 5))
+                    bg_surf = pygame.Surface((bg_rect.width + 6, bg_rect.height + 4))
+                    bg_surf.set_alpha(180)
+                    bg_surf.fill((0, 0, 0))
+                    surface.blit(bg_surf, (screen_x + 3, self.display_height - bg_rect.height - 7))
+                    surface.blit(text, (screen_x + 5, self.display_height - bg_rect.height - 5))
             
             lon += lon_spacing
     
     def _draw_scale_ruler(self, surface):
         """Draw a scale ruler at the bottom of the map showing distance"""
-        # Calculate meters per degree at center latitude
-        center_lat = (self.view_min_lat + self.view_max_lat) / 2
+        # Get visible bounds to calculate scale
+        bounds = self._get_visible_bounds_latlon()
+        if not bounds:
+            return
         
-        # Approximate meters per degree at this latitude
+        lon_west, lat_south, lon_east, lat_north = bounds
+        
+        # Calculate center latitude for accurate distance calculation
+        center_lat = (lat_north + lat_south) / 2
+        
+        # Meters per degree at this latitude
         meters_per_degree_lon = 111320 * np.cos(np.radians(center_lat))
         
         # Calculate meters per screen pixel
-        lon_range = self.view_max_lon - self.view_min_lon
+        lon_range = lon_east - lon_west
         meters_per_screen_pixel = (lon_range * meters_per_degree_lon) / self.display_width
         
         # Determine appropriate ruler length and units
@@ -708,6 +804,12 @@ class LcarsGeologicalMap(LcarsWidget):
                 ("{} units loaded".format(len(self.gdf)), text_color)
             )
         
+        # Add current center coordinates
+        center_lat, center_lon = self.get_view_center()
+        coord_text = "Center: {:.5f}°N, {:.5f}°W".format(
+            center_lat, abs(center_lon))
+        info_lines.append((coord_text, text_color))
+        
         y_pos = 10
         for line_text, color in info_lines:
             text = font.render(line_text, True, color)
@@ -732,12 +834,10 @@ class LcarsGeologicalMap(LcarsWidget):
         self.image.fill((0, 0, 0))
         
         # Check if we need to regenerate the cached surface
-        current_bounds = (self.view_min_lon, self.view_min_lat, 
-                         self.view_max_lon, self.view_max_lat)
-        
         needs_regeneration = (
             self.cached_surface is None or
-            self.cache_view_bounds != current_bounds or
+            self.cache_cam_x != self.cam_x or
+            self.cache_cam_y != self.cam_y or
             self.cache_zoom != self.zoom
         )
         
@@ -746,10 +846,11 @@ class LcarsGeologicalMap(LcarsWidget):
             self.cached_surface = pygame.Surface((self.display_width, self.display_height))
             self.cached_surface.fill((0, 0, 0))
             self._draw_geological_units(self.cached_surface)
-            self._draw_latlon_grid(self.cached_surface)  # Add lat/lon grid to cache
+            self._draw_latlon_grid(self.cached_surface)
             
             # Update cache metadata
-            self.cache_view_bounds = current_bounds
+            self.cache_cam_x = self.cam_x
+            self.cache_cam_y = self.cam_y
             self.cache_zoom = self.zoom
         
         # Blit cached surface if available
@@ -760,9 +861,9 @@ class LcarsGeologicalMap(LcarsWidget):
             self._draw_geological_units(self.image)
         
         # Draw overlays (not cached - always on top)
-        self._draw_scale_ruler(self.image)  # Scale ruler
-        self._draw_unit_marker(self.image)  # Unit marker
-        self._draw_info_overlay(self.image)  # Info overlay
+        self._draw_scale_ruler(self.image)
+        self._draw_unit_marker(self.image)
+        self._draw_info_overlay(self.image)
         
         # Blit to screen
         screen.blit(self.image, self.rect)
@@ -775,14 +876,21 @@ class LcarsGeologicalMap(LcarsWidget):
             return False
         
         # Handle mouse clicks
-        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:  # Left click
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if self.rect.collidepoint(event.pos):
                 # Convert screen coordinates to widget-relative coordinates
                 x_rel = event.pos[0] - self.rect.left
                 y_rel = event.pos[1] - self.rect.top
                 
+                # Convert to virtual pixel coordinates
+                pixel_x, pixel_y = self._screen_to_pixel(x_rel, y_rel)
+                
                 # Convert to lat/lon
-                lon, lat = self._screen_to_latlon(x_rel, y_rel)
+                coords = self._pixel_to_latlon(pixel_x, pixel_y)
+                if not coords:
+                    return False
+                
+                lat, lon = coords
                 
                 # Store clicked location
                 self.clicked_lat = lat
