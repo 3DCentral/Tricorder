@@ -1,3 +1,11 @@
+"""Waterfall display widget with filter width control for fine-tuning frequency selection
+
+CHANGES FROM ORIGINAL:
+- Removed bandwidth adjustment (up/down arrows)
+- Added filter width control (up/down arrows)
+- Filter width affects the visual bandwidth indicator
+- Filter width is independent of SDR sample rate
+"""
 import pygame
 import numpy as np
 from ui.widgets.sprite import LcarsWidget
@@ -8,7 +16,7 @@ class LcarsWaterfall(LcarsWidget):
     Waterfall display widget for live SDR spectrum visualization
     Shows a scrolling 2D spectrogram with PSD overlay
     
-    OPTIMIZED VERSION - Uses numpy array operations instead of pixel-by-pixel rendering
+    NEW: Filter width control for precise frequency tuning
     """
     
     def __init__(self, pos, size=(640, 480)):
@@ -52,18 +60,29 @@ class LcarsWaterfall(LcarsWidget):
         self.scan_process = None
         self.scan_active = False
         
-        # Bandwidth control
-        self.bandwidth_options = [
-            200000,   # 200 kHz - Very narrow (single channel)
-            500000,   # 500 kHz
-            1000000,  # 1 MHz
-            1200000,  # 1.2 MHz
-            2400000,  # 2.4 MHz - Default RTL-SDR bandwidth
-            3200000,  # 3.2 MHz - Maximum for stable operation
-        ]
-        self.bandwidth_index = 4  # Start at 2.4 MHz (index 4)
+        # SDR bandwidth (sample rate) - controls what frequencies we see
         self.current_bandwidth = 2400000  # 2.4 MHz default
         self.center_frequency = None
+        
+        # NEW: Filter width control (for demodulation/listening bandwidth)
+        # This is separate from SDR bandwidth and controls how wide a frequency
+        # range we're trying to tune in to
+        self.filter_width_options = [
+            5000,      # 5 kHz - Very narrow (NBFM, single channel)
+            8000,      # 8 kHz - Narrow
+            12000,     # 12 kHz - NBFM standard
+            16000,     # 16 kHz - Wider NBFM (DEFAULT - good balance)
+            25000,     # 25 kHz - Wide NBFM
+            40000,     # 40 kHz - Very wide
+            75000,     # 75 kHz - Extra wide
+            100000,    # 100 kHz - Wideband
+            150000,    # 150 kHz - Very wideband
+            200000,    # 200 kHz - WBFM (FM broadcast)
+            300000,    # 300 kHz - Ultra wide
+            500000,    # 500 kHz - Maximum
+        ]
+        self.filter_width_index = 3  # Start at 16 kHz (index 3) - better default
+        self.filter_width = 16000  # 16 kHz default (wider NBFM for clearer audio)
         
         # OPTIMIZATION: Cache rendered waterfall surface to avoid re-rendering when paused
         self.cached_waterfall_surface = None
@@ -113,46 +132,43 @@ class LcarsWaterfall(LcarsWidget):
         )
         self.scan_active = True
         
-        print("Live scan started at {:.3f} MHz with {:.1f} MHz bandwidth".format(
+        print("Live scan started at {:.3f} MHz with {:.1f} MHz SDR bandwidth".format(
             center_freq / 1e6, sample_rate / 1e6))
+        print("Filter width: {:.1f} kHz".format(self.filter_width / 1000))
     
-    def adjust_bandwidth(self, direction):
-        """Increase (1) or decrease (-1) bandwidth and restart scan
+    def adjust_filter_width(self, direction):
+        """Increase (1) or decrease (-1) filter width for fine-tuning
+        
+        This adjusts the listening/demodulation bandwidth without changing
+        what frequencies are visible in the waterfall (SDR bandwidth stays same)
         
         Args:
             direction: 1 for increase, -1 for decrease
         """
-        if not self.scan_active:
-            return
+        # Adjust filter width index
+        self.filter_width_index += direction
+        self.filter_width_index = max(0, min(len(self.filter_width_options) - 1, 
+                                             self.filter_width_index))
         
-        # Adjust bandwidth index
-        self.bandwidth_index += direction
-        self.bandwidth_index = max(0, min(len(self.bandwidth_options) - 1, self.bandwidth_index))
-        
-        # Update bandwidth
-        self.current_bandwidth = self.bandwidth_options[self.bandwidth_index]
-        
-        # Use stored center frequency
-        center_freq = self.center_frequency if self.center_frequency else self.selected_frequency
-        if not center_freq:
-            print("No center frequency set")
-            return
+        # Update filter width
+        self.filter_width = self.filter_width_options[self.filter_width_index]
         
         # Print status
         print("\n" + "="*60)
-        print("WATERFALL BANDWIDTH ADJUSTMENT")
+        print("FILTER WIDTH ADJUSTMENT")
         print("="*60)
-        print("New bandwidth: {:.1f} MHz ({:.0f} kHz)".format(
-            self.current_bandwidth / 1e6,
-            self.current_bandwidth / 1000))
-        print("Center frequency: {:.3f} MHz".format(center_freq / 1e6))
-        print("Frequency range: {:.3f} - {:.3f} MHz".format(
-            (center_freq - self.current_bandwidth/2) / 1e6,
-            (center_freq + self.current_bandwidth/2) / 1e6))
-        print("="*60 + "\n")
+        print("New filter width: {:.1f} kHz".format(self.filter_width / 1000))
         
-        # Restart with new bandwidth
-        self.start_scan(center_freq, self.current_bandwidth)
+        if self.selected_frequency:
+            print("Selected frequency: {:.3f} MHz".format(self.selected_frequency / 1e6))
+            print("Filter range: {:.3f} - {:.3f} MHz".format(
+                (self.selected_frequency - self.filter_width/2) / 1e6,
+                (self.selected_frequency + self.filter_width/2) / 1e6))
+        
+        print("\nNOTE: Filter width controls demodulation bandwidth")
+        print("      SDR bandwidth ({:.1f} MHz) unchanged".format(
+            self.current_bandwidth / 1e6))
+        print("="*60 + "\n")
     
     def adjust_frequency(self, direction):
         """Tune frequency up (1) or down (-1) and restart scan
@@ -169,7 +185,7 @@ class LcarsWaterfall(LcarsWidget):
             print("No center frequency set")
             return
         
-        # Step size is 10% of bandwidth
+        # Step size is 10% of SDR bandwidth (not filter width!)
         freq_step = self.current_bandwidth * 0.1
         center_freq += (direction * freq_step)
         
@@ -178,10 +194,10 @@ class LcarsWaterfall(LcarsWidget):
         
         # Print status
         print("\n" + "="*60)
-        print("WATERFALL FREQUENCY ADJUSTMENT")
+        print("FREQUENCY ADJUSTMENT")
         print("="*60)
         print("New center frequency: {:.3f} MHz".format(center_freq / 1e6))
-        print("Bandwidth: {:.1f} MHz".format(self.current_bandwidth / 1e6))
+        print("SDR bandwidth: {:.1f} MHz".format(self.current_bandwidth / 1e6))
         print("Frequency range: {:.3f} - {:.3f} MHz".format(
             (center_freq - self.current_bandwidth/2) / 1e6,
             (center_freq + self.current_bandwidth/2) / 1e6))
@@ -189,7 +205,15 @@ class LcarsWaterfall(LcarsWidget):
         
         # Restart with new frequency
         self.start_scan(center_freq, self.current_bandwidth)
+    
+    def get_filter_width(self):
+        """Get current filter width in Hz
         
+        Returns:
+            int: Filter width in Hz
+        """
+        return self.filter_width
+    
     def _generate_colormap(self, num_colors=256):
         """Generate a color map for waterfall display"""
         colormap = []
@@ -301,8 +325,8 @@ class LcarsWaterfall(LcarsWidget):
         
         Args:
             data: Array of dB values
-            vmin: Minimum dB value (maps to 0/blue) - adjusted to actual signal range
-            vmax: Maximum dB value (maps to 255/red) - adjusted to actual signal range
+            vmin: Minimum dB value (maps to 0/blue)
+            vmax: Maximum dB value (maps to 255/red)
         """
         # Clip to range
         normalized = np.clip(data, vmin, vmax)
@@ -327,12 +351,9 @@ class LcarsWaterfall(LcarsWidget):
         normalized = self._normalize_to_color_range(self.waterfall_data)
         
         # OPTIMIZATION: Use numpy indexing to map all pixels to colors at once
-        # This is MUCH faster than pixel-by-pixel operations
-        # Shape will be (num_lines, num_bins, 3) for RGB
         colored_data = self.colormap_array[normalized]
         
         # OPTIMIZATION: Create surface from numpy array directly
-        # Transpose because pygame expects (width, height) but we have (height, width)
         waterfall_surface = pygame.surfarray.make_surface(
             np.transpose(colored_data, (1, 0, 2))
         )
@@ -371,7 +392,7 @@ class LcarsWaterfall(LcarsWidget):
         points = []
         for i in range(num_points):
             x = int(i * self.display_width / num_points)
-            y = int(self.psd_height - 10 - psd_scaled[i])  # Flip Y axis and add margin
+            y = int(self.psd_height - 10 - psd_scaled[i])
             points.append((x, y))
         
         # Draw background for PSD area
@@ -394,7 +415,7 @@ class LcarsWaterfall(LcarsWidget):
         if self.frequencies is None:
             return
         
-        font = pygame.font.Font("assets/swiss911.ttf", 24)  # Increased from 12 to 24
+        font = pygame.font.Font("assets/swiss911.ttf", 24)
         
         # Draw min, center, max frequencies
         freq_min = self.frequencies[0] / 1e6  # Convert to MHz
@@ -416,26 +437,21 @@ class LcarsWaterfall(LcarsWidget):
         surface.blit(text, text_rect)
     
     def _draw_frequency_selector(self, surface):
-        """Draw the frequency selection indicator with demodulation bandwidth"""
+        """Draw the frequency selection indicator with FILTER WIDTH visualization"""
         if self.selected_x is None or self.selected_frequency is None:
             return
         
-        # Get demodulation bandwidth if available
-        demod_bandwidth_hz = None
-        if self.demodulator and self.frequencies is not None:
-            # Get the bandwidth for the selected frequency
-            freq_mhz = self.selected_frequency / 1e6
-            demod_params = self.demodulator.get_demodulation_params(freq_mhz)
-            demod_bandwidth_hz = demod_params.get('bandwidth', None)
+        # Use filter width (not demodulator bandwidth)
+        filter_bandwidth_hz = self.filter_width
         
-        # Draw bandwidth rectangle if we have the info
-        if demod_bandwidth_hz and self.frequencies is not None:
+        # Draw bandwidth rectangle showing filter width
+        if filter_bandwidth_hz and self.frequencies is not None:
             freq_min = self.frequencies[0]
             freq_max = self.frequencies[-1]
             freq_range = freq_max - freq_min
             
             # Calculate bandwidth in pixels
-            bandwidth_ratio = demod_bandwidth_hz / freq_range
+            bandwidth_ratio = filter_bandwidth_hz / freq_range
             bandwidth_pixels = int(bandwidth_ratio * self.display_width)
             
             # Calculate left and right edges of bandwidth box
@@ -456,7 +472,7 @@ class LcarsWaterfall(LcarsWidget):
                 pygame.draw.rect(surface, (255, 255, 0), 
                                (x_left, self.psd_height, box_width, box_height), 2)
         
-        # Draw vertical line at selected frequency (center of bandwidth)
+        # Draw vertical line at selected frequency (center of filter)
         pygame.draw.line(surface, (255, 255, 0), 
                         (self.selected_x, self.psd_height), 
                         (self.selected_x, self.display_height - 40), 
@@ -471,19 +487,16 @@ class LcarsWaterfall(LcarsWidget):
                         (self.selected_x, crosshair_y - 10),
                         (self.selected_x, crosshair_y + 10), 2)
         
-        # Draw frequency label with bandwidth info
+        # Draw frequency label with FILTER WIDTH info
         font = pygame.font.Font("assets/swiss911.ttf", 20)
         freq_mhz = self.selected_frequency / 1e6
         
-        # Include bandwidth in label if available
-        if demod_bandwidth_hz:
-            if demod_bandwidth_hz >= 1000:
-                bw_text = "{:.1f} kHz BW".format(demod_bandwidth_hz / 1000)
-            else:
-                bw_text = "{:.0f} Hz BW".format(demod_bandwidth_hz)
-            label_text = "{:.3f} MHz ({})".format(freq_mhz, bw_text)
+        # Show filter width in label
+        if filter_bandwidth_hz >= 1000:
+            bw_text = "{:.1f} kHz filter".format(filter_bandwidth_hz / 1000)
         else:
-            label_text = "{:.3f} MHz".format(freq_mhz)
+            bw_text = "{:.0f} Hz filter".format(filter_bandwidth_hz)
+        label_text = "{:.3f} MHz ({})".format(freq_mhz, bw_text)
         
         text = font.render(label_text, True, (255, 255, 0))
         text_rect = text.get_rect(center=(self.selected_x, crosshair_y + 30))
@@ -503,15 +516,11 @@ class LcarsWaterfall(LcarsWidget):
         surface.blit(text, text_rect)
     
     def update(self, screen):
-        """Update and render the waterfall display
-        
-        OPTIMIZED: Only re-renders when data changes or scan is active
-        """
+        """Update and render the waterfall display"""
         if not self.visible:
             return
         
-        # OPTIMIZATION: Only clear and redraw if scanning or data changed
-        # This prevents continuous re-rendering when paused
+        # OPTIMIZATION: Only re-renders when data changes or scan is active
         needs_redraw = self.scan_active or self.cached_waterfall_surface is None
         
         if needs_redraw:
@@ -524,7 +533,7 @@ class LcarsWaterfall(LcarsWidget):
             self._draw_frequency_selector(self.image)
             self._draw_frequency_labels(self.image)
         
-        # Always blit to screen (even if not redrawn, to maintain visibility)
+        # Always blit to screen
         screen.blit(self.image, self.rect)
         
         self.dirty = 0

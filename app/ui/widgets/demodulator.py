@@ -1,4 +1,10 @@
-"""FM/AM demodulation controller widget"""
+"""FM/AM demodulation controller widget with filter width integration
+
+CHANGES FROM ORIGINAL:
+- Now uses filter width from waterfall display for demodulation bandwidth
+- Increased default bandwidths to match wider filter options
+- Added method to set bandwidth dynamically
+"""
 import subprocess
 import os
 import signal
@@ -10,8 +16,7 @@ class LcarsDemodulator(LcarsWidget):
     Non-visual widget for FM/AM/NBFM demodulation control
     
     This widget manages the rtl_fm process for audio demodulation.
-    Although it has no visual representation, it follows the widget
-    pattern for consistency with the architecture.
+    Now integrated with filter width control for dynamic bandwidth adjustment.
     
     Note: Must set self.image = None BEFORE calling parent __init__.
     Must also pass valid color (not None) and size >= 1x1 because
@@ -31,13 +36,15 @@ class LcarsDemodulator(LcarsWidget):
         self.fm_process = None
         self.tuned_in = False
         self.current_frequency = None
+        self.current_bandwidth = None  # Track current demodulation bandwidth
         
-    def get_demodulation_params(self, freq_mhz):
+    def get_demodulation_params(self, freq_mhz, filter_width_hz=None):
         """
-        Determine optimal demodulation parameters based on frequency
+        Determine optimal demodulation parameters based on frequency and filter width
         
         Args:
             freq_mhz: Frequency in MHz
+            filter_width_hz: Filter width in Hz (from waterfall), or None for auto
             
         Returns:
             Dictionary with mode, sample_rate, bandwidth, gain, squelch, mode_name,
@@ -46,12 +53,12 @@ class LcarsDemodulator(LcarsWidget):
         # Weather Radio (NOAA): 162.400 - 162.550 MHz
         # Uses narrow-band FM (NBFM) with 12.5 kHz deviation
         if 162.0 <= freq_mhz <= 163.0:
-            return {
+            base_params = {
                 'mode': 'fm',           # Narrow-band FM
-                'sample_rate': 16000,   # 16 kHz sample rate (increased for better capture)
-                'bandwidth': 16000,     # 16 kHz bandwidth
+                'sample_rate': 16000,   # 16 kHz sample rate
+                'bandwidth': 16000,     # 16 kHz bandwidth (base)
                 'gain': 40,             # Specific gain for weak signals
-                'squelch': 0,           # No squelch initially (hear everything)
+                'squelch': 0,           # No squelch initially
                 'mode_name': 'NBFM (Weather Radio)',
                 'band_name': 'NOAA Weather Radio',
                 'band_description': [
@@ -64,11 +71,11 @@ class LcarsDemodulator(LcarsWidget):
         # Marine VHF: 156-162 MHz
         # Uses narrow-band FM with 12.5 kHz deviation
         elif 156.0 <= freq_mhz <= 162.0:
-            return {
+            base_params = {
                 'mode': 'fm',
                 'sample_rate': 12000,
                 'bandwidth': 12500,
-                'gain': None,           # Auto gain
+                'gain': None,
                 'squelch': 0,
                 'mode_name': 'NBFM (Marine VHF)',
                 'band_name': 'Marine VHF Radio',
@@ -82,10 +89,10 @@ class LcarsDemodulator(LcarsWidget):
         # Aviation: 118-137 MHz
         # Uses AM (Amplitude Modulation)
         elif 118.0 <= freq_mhz <= 137.0:
-            return {
+            base_params = {
                 'mode': 'am',
                 'sample_rate': 12000,
-                'bandwidth': 10000,     # 10 kHz for AM aviation
+                'bandwidth': 10000,
                 'gain': None,
                 'squelch': 0,
                 'mode_name': 'AM (Aviation)',
@@ -100,9 +107,9 @@ class LcarsDemodulator(LcarsWidget):
         # 2-meter Ham Radio: 144-148 MHz
         # Uses narrow-band FM with 12.5 kHz or 25 kHz deviation
         elif 144.0 <= freq_mhz <= 148.0:
-            return {
+            base_params = {
                 'mode': 'fm',
-                'sample_rate': 16000,   # Slightly wider for ham
+                'sample_rate': 16000,
                 'bandwidth': 16000,
                 'gain': None,
                 'squelch': 0,
@@ -118,7 +125,7 @@ class LcarsDemodulator(LcarsWidget):
         # Commercial FM Broadcast: 88-108 MHz
         # Uses wide-band FM with 75 kHz deviation
         elif 88.0 <= freq_mhz <= 108.0:
-            return {
+            base_params = {
                 'mode': 'wbfm',         # Wide-band FM
                 'sample_rate': 200000,  # 200 kHz sample rate
                 'bandwidth': 200000,
@@ -136,7 +143,7 @@ class LcarsDemodulator(LcarsWidget):
         # PMR446 / FRS / GMRS: 446-467 MHz
         # Uses narrow-band FM
         elif 446.0 <= freq_mhz <= 467.0:
-            return {
+            base_params = {
                 'mode': 'fm',
                 'sample_rate': 12000,
                 'bandwidth': 12500,
@@ -154,7 +161,7 @@ class LcarsDemodulator(LcarsWidget):
         # 70cm Ham Radio: 420-450 MHz
         # Uses narrow-band FM
         elif 420.0 <= freq_mhz <= 450.0:
-            return {
+            base_params = {
                 'mode': 'fm',
                 'sample_rate': 16000,
                 'bandwidth': 16000,
@@ -170,9 +177,8 @@ class LcarsDemodulator(LcarsWidget):
             }
         
         # Default: Use narrow-band FM for most applications
-        # This is a safe default for unknown frequencies
         else:
-            return {
+            base_params = {
                 'mode': 'fm',
                 'sample_rate': 12000,
                 'bandwidth': 12500,
@@ -186,13 +192,28 @@ class LcarsDemodulator(LcarsWidget):
                     'default NBFM mode'
                 ]
             }
+        
+        # OVERRIDE bandwidth with filter width if provided
+        if filter_width_hz is not None:
+            # Use the filter width from waterfall display
+            base_params['bandwidth'] = filter_width_hz
+            base_params['sample_rate'] = max(base_params['sample_rate'], filter_width_hz)
+            
+            # Add filter width info to mode name
+            if filter_width_hz >= 1000:
+                base_params['mode_name'] += " ({:.1f} kHz)".format(filter_width_hz / 1000)
+            else:
+                base_params['mode_name'] += " ({:.0f} Hz)".format(filter_width_hz)
+        
+        return base_params
     
-    def get_demodulation_info(self, freq_hz):
+    def get_demodulation_info(self, freq_hz, filter_width_hz=None):
         """
         Get formatted demodulation information for display
         
         Args:
             freq_hz: Frequency in Hz (or None)
+            filter_width_hz: Filter width in Hz (from waterfall), or None
             
         Returns:
             List of strings suitable for LcarsTextDisplay.set_lines()
@@ -207,7 +228,7 @@ class LcarsDemodulator(LcarsWidget):
         
         # Get demodulation parameters
         freq_mhz = freq_hz / 1e6
-        params = self.get_demodulation_params(freq_mhz)
+        params = self.get_demodulation_params(freq_mhz, filter_width_hz)
         
         # Build info display
         lines = [
@@ -248,14 +269,20 @@ class LcarsDemodulator(LcarsWidget):
         # Add detailed description (already formatted as list)
         lines.extend(params['band_description'])
         
+        # Add filter width note if using custom width
+        if filter_width_hz is not None:
+            lines.append("")
+            lines.append("Filter: Custom")
+        
         return lines
     
-    def start_demodulation(self, frequency_hz):
+    def start_demodulation(self, frequency_hz, filter_width_hz=None):
         """
-        Start FM/AM demodulation at the specified frequency
+        Start FM/AM demodulation at the specified frequency with optional filter width
         
         Args:
             frequency_hz: Frequency in Hz (will be converted to MHz internally)
+            filter_width_hz: Filter width in Hz (from waterfall), or None for auto
         """
         # Stop any existing demodulation first
         self.stop_demodulation()
@@ -263,13 +290,16 @@ class LcarsDemodulator(LcarsWidget):
         # Convert to MHz
         freq_mhz = frequency_hz / 1e6
         
-        # Get optimal parameters for this frequency
-        demod_params = self.get_demodulation_params(freq_mhz)
+        # Get optimal parameters for this frequency (with filter width override)
+        demod_params = self.get_demodulation_params(freq_mhz, filter_width_hz)
+        
+        # Store current bandwidth
+        self.current_bandwidth = demod_params['bandwidth']
         
         # Print demodulation info
         print("Tuning {} demodulation to {:.3f} MHz...".format(
             demod_params['mode_name'], freq_mhz))
-        print("  Mode: {} | Bandwidth: {} kHz | Sample rate: {} kHz".format(
+        print("  Mode: {} | Bandwidth: {:.1f} kHz | Sample rate: {:.1f} kHz".format(
             demod_params['mode'],
             demod_params['bandwidth'] / 1000,
             demod_params['sample_rate'] / 1000))
@@ -343,6 +373,7 @@ class LcarsDemodulator(LcarsWidget):
         
         self.tuned_in = False
         self.current_frequency = None
+        self.current_bandwidth = None
     
     def is_active(self):
         """
@@ -361,6 +392,15 @@ class LcarsDemodulator(LcarsWidget):
             float: Frequency in Hz, or None if not demodulating
         """
         return self.current_frequency
+    
+    def get_current_bandwidth(self):
+        """
+        Get the current demodulation bandwidth
+        
+        Returns:
+            float: Bandwidth in Hz, or None if not demodulating
+        """
+        return self.current_bandwidth
     
     def update(self, screen):
         """
