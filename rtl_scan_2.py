@@ -123,9 +123,9 @@ for f in range(int(start_freq+sample_rate/2),int(end_freq-sample_rate/2)+int(sam
         label.set_color('yellow')
     
     # Save progress image
-    plt.savefig("/home/tricorder/rpi_lcars-master/spectrum_progress_"+str(num_scans)+".png", 
+    plt.savefig("/tmp/spectrum_progress_"+str(num_scans)+".png", 
                 dpi=100, facecolor="black", bbox_inches='tight', pad_inches=0)
-    plt.savefig("/home/tricorder/rpi_lcars-master/spectrum.png", 
+    plt.savefig("/tmp/spectrum.png", 
                 dpi=100, facecolor="black", bbox_inches='tight', pad_inches=0)
     plt.close()
 
@@ -186,7 +186,7 @@ for label in ax.get_xticklabels():
     label.set_color('yellow')
 
 # Save final image
-plt.savefig("/home/tricorder/rpi_lcars-master/spectrum.png", 
+plt.savefig("/tmp/spectrum.png", 
             dpi=100, facecolor="black", bbox_inches='tight', pad_inches=0)
 plt.close()
 

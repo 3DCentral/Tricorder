@@ -32,7 +32,7 @@ GAIN = 4  # Can adjust based on signal strength needs
 FREQ_CORRECTION = 60  # PPM correction
 
 # Output file paths
-OUTPUT_DIR = "/home/tricorder/rpi_lcars-master/"
+OUTPUT_DIR = "/tmp/"
 PSD_FILE = OUTPUT_DIR + "spectrum_live_psd.npy"
 PSD_FILE_TEMP = OUTPUT_DIR + "spectrum_live_psd_temp.npy"
 WATERFALL_FILE = OUTPUT_DIR + "spectrum_live_waterfall.npy"
