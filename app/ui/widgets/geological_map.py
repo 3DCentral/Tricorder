@@ -169,10 +169,10 @@ class LcarsGeologicalMap(LcarsWidget):
                 data_lon_min, data_lon_max, data_lat_min, data_lat_max))
             
             # Use the actual data bounds (should match USGS topo map: 37-38N, 77-78W)
-            self.lat_min = data_lat_min
-            self.lat_max = data_lat_max
-            self.lon_min = data_lon_min
-            self.lon_max = data_lon_max
+            #self.lat_min = data_lat_min
+            #self.lat_max = data_lat_max
+            #self.lon_min = data_lon_min
+            #self.lon_max = data_lon_max
             
             # Build age cache for color mapping
             print("Building age-based color cache...")
