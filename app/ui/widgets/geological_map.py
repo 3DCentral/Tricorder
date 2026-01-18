@@ -19,6 +19,61 @@ class LcarsGeologicalMap(LcarsWidget):
     CRITICAL: Uses SAME coordinate system as topographical map for proper synchronization
     """
     
+    # Geological time scale lookup table (ages in millions of years)
+    # Based on International Commission on Stratigraphy (ICS) 2023
+    GEOLOGICAL_AGES = {
+        # Cenozoic Era
+        'Holocene': (0.0117, 0, 'Quaternary'),
+        'Pleistocene': (2.58, 0.0117, 'Quaternary'),
+        'Pliocene': (5.333, 2.58, 'Neogene'),
+        'Miocene': (23.03, 5.333, 'Neogene'),
+        'Oligocene': (33.9, 23.03, 'Paleogene'),
+        'Eocene': (56.0, 33.9, 'Paleogene'),
+        'Paleocene': (66.0, 56.0, 'Paleogene'),
+        
+        # Mesozoic Era
+        'Cretaceous': (145.0, 66.0, 'Mesozoic'),
+        'Jurassic': (201.3, 145.0, 'Mesozoic'),
+        'Triassic': (251.9, 201.3, 'Mesozoic'),
+        
+        # Paleozoic Era
+        'Permian': (298.9, 251.9, 'Paleozoic'),
+        'Carboniferous': (358.9, 298.9, 'Paleozoic'),
+        'Pennsylvanian': (323.2, 298.9, 'Paleozoic'),
+        'Mississippian': (358.9, 323.2, 'Paleozoic'),
+        'Devonian': (419.2, 358.9, 'Paleozoic'),
+        'Silurian': (443.8, 419.2, 'Paleozoic'),
+        'Ordovician': (485.4, 443.8, 'Paleozoic'),
+        'Cambrian': (541.0, 485.4, 'Paleozoic'),
+        
+        # Precambrian
+        'Ediacaran': (635.0, 541.0, 'Precambrian'),
+        'Cryogenian': (720.0, 635.0, 'Precambrian'),
+        'Tonian': (1000.0, 720.0, 'Precambrian'),
+        'Stenian': (1200.0, 1000.0, 'Precambrian'),
+        'Ectasian': (1400.0, 1200.0, 'Precambrian'),
+        'Calymmian': (1600.0, 1400.0, 'Precambrian'),
+        'Statherian': (1800.0, 1600.0, 'Precambrian'),
+        'Orosirian': (2050.0, 1800.0, 'Precambrian'),
+        'Rhyacian': (2300.0, 2050.0, 'Precambrian'),
+        'Siderian': (2500.0, 2300.0, 'Precambrian'),
+        'Neoarchean': (2800.0, 2500.0, 'Precambrian'),
+        'Mesoarchean': (3200.0, 2800.0, 'Precambrian'),
+        'Paleoarchean': (3600.0, 3200.0, 'Precambrian'),
+        'Eoarchean': (4000.0, 3600.0, 'Precambrian'),
+        'Hadean': (4600.0, 4000.0, 'Precambrian'),
+        
+        # Combined periods (sometimes used in geological maps)
+        'Quaternary': (2.58, 0, 'Cenozoic'),
+        'Neogene': (23.03, 2.58, 'Cenozoic'),
+        'Paleogene': (66.0, 23.03, 'Cenozoic'),
+        'Mesozoic': (251.9, 66.0, 'Mesozoic'),
+        'Paleozoic': (541.0, 251.9, 'Paleozoic'),
+        'Precambrian': (4600.0, 541.0, 'Precambrian'),
+        'Proterozoic': (2500.0, 541.0, 'Precambrian'),
+        'Archean': (4000.0, 2500.0, 'Precambrian'),
+    }
+    
     def __init__(self, pos, size=(640, 480), geojson_file=None):
         """
         Initialize geological map display
@@ -228,6 +283,52 @@ class LcarsGeologicalMap(LcarsWidget):
             self.unit_colors[unit] = (r, g, b)
         
         return self.unit_colors[unit]
+    
+    def _format_age_detail(self, age_name):
+        """
+        Format geological age with specific time range
+        
+        Args:
+            age_name: Name of geological age/period (e.g., "Oligocene")
+            
+        Returns:
+            str: Formatted age string with time range
+        """
+        if not age_name or age_name == 'Unknown':
+            return None
+        
+        # Try to find exact match first
+        age_key = age_name.strip()
+        if age_key in self.GEOLOGICAL_AGES:
+            start_ma, end_ma, era = self.GEOLOGICAL_AGES[age_key]
+            
+            # Format the time range nicely
+            if end_ma == 0:
+                return "{} (~{:.1f} Ma to present)".format(age_key, start_ma)
+            elif start_ma >= 1000:
+                # For very old rocks, use Ga (billions of years)
+                return "{} (~{:.1f} Ga to ~{:.1f} Ga)".format(
+                    age_key, start_ma / 1000, end_ma / 1000)
+            else:
+                return "{} (~{:.1f} Ma to ~{:.1f} Ma)".format(
+                    age_key, start_ma, end_ma)
+        
+        # Try partial match (e.g., "Early Oligocene" contains "Oligocene")
+        for known_age in self.GEOLOGICAL_AGES.keys():
+            if known_age.lower() in age_key.lower():
+                start_ma, end_ma, era = self.GEOLOGICAL_AGES[known_age]
+                
+                if end_ma == 0:
+                    return "{} (~{:.1f} Ma to present)".format(age_key, start_ma)
+                elif start_ma >= 1000:
+                    return "{} (~{:.1f} Ga to ~{:.1f} Ga)".format(
+                        age_key, start_ma / 1000, end_ma / 1000)
+                else:
+                    return "{} (~{:.1f} Ma to ~{:.1f} Ma)".format(
+                        age_key, start_ma, end_ma)
+        
+        # If no match found, return as-is
+        return age_key
     
     def _pixel_to_screen(self, pixel_x, pixel_y):
         """
@@ -529,47 +630,66 @@ class LcarsGeologicalMap(LcarsWidget):
         
         # Draw info label if we have unit data
         if self.clicked_unit:
-            font = pygame.font.Font("assets/swiss911.ttf", 16)
+            font = pygame.font.Font("assets/swiss911.ttf", 14)  # Slightly smaller for more text
             
-            # Format text
+            # Format unit text (may be multi-line if very long)
             unit_text = "Unit: {}".format(self.clicked_unit)
-            age_text = "Age: {}".format(self.clicked_age) if self.clicked_age else ""
             
-            # Render text
+            # Format age with detailed time range
+            age_detail = self._format_age_detail(self.clicked_age)
+            
+            # Render text surfaces
             unit_surface = font.render(unit_text, True, (255, 153, 0))
+            
+            # Calculate text surfaces for age (may need to wrap if too long)
+            age_surfaces = []
+            if age_detail:
+                # Check if age text is too long (>50 chars, needs wrapping)
+                if len(age_detail) > 50:
+                    # Split at parenthesis for cleaner wrapping
+                    parts = age_detail.split('(')
+                    age_surfaces.append(font.render("Age: " + parts[0].strip(), True, (153, 153, 255)))
+                    if len(parts) > 1:
+                        age_surfaces.append(font.render("  (" + parts[1], True, (153, 153, 255)))
+                else:
+                    age_surfaces.append(font.render("Age: " + age_detail, True, (153, 153, 255)))
             
             # Position label
             label_x = screen_x + cross_size + 10
             label_y = screen_y - cross_size - 10
             
+            # Calculate total box size
+            box_width = unit_surface.get_width() + 10
+            box_height = unit_surface.get_height() + 2
+            
+            for age_surf in age_surfaces:
+                box_width = max(box_width, age_surf.get_width() + 10)
+                box_height += age_surf.get_height() + 2
+            
             # Adjust if too close to edge
-            if label_x + unit_surface.get_width() > self.display_width - 10:
-                label_x = screen_x - cross_size - unit_surface.get_width() - 10
+            if label_x + box_width > self.display_width - 10:
+                label_x = screen_x - cross_size - box_width - 10
             if label_y < 10:
                 label_y = screen_y + cross_size + 10
             
-            # Calculate box size
-            box_width = unit_surface.get_width() + 10
-            box_height = unit_surface.get_height()
-            if age_text:
-                age_surface = font.render(age_text, True, (153, 153, 255))
-                box_width = max(box_width, age_surface.get_width() + 10)
-                box_height += age_surface.get_height() + 2
-            
             # Draw background box
-            bg_surf = pygame.Surface((box_width, box_height))
+            bg_surf = pygame.Surface((box_width, box_height + 5))
             bg_surf.set_alpha(200)
             bg_surf.fill((0, 0, 0))
             surface.blit(bg_surf, (label_x - 5, label_y - 5))
             
             # Draw border
             pygame.draw.rect(surface, (255, 153, 0),
-                           (label_x - 5, label_y - 5, box_width, box_height), 2)
+                           (label_x - 5, label_y - 5, box_width, box_height + 5), 2)
             
             # Draw text
-            surface.blit(unit_surface, (label_x, label_y))
-            if age_text:
-                surface.blit(age_surface, (label_x, label_y + unit_surface.get_height() + 2))
+            current_y = label_y
+            surface.blit(unit_surface, (label_x, current_y))
+            current_y += unit_surface.get_height() + 2
+            
+            for age_surf in age_surfaces:
+                surface.blit(age_surf, (label_x, current_y))
+                current_y += age_surf.get_height() + 2
     
     def _draw_latlon_grid(self, surface):
         """Draw latitude/longitude grid lines and labels"""
@@ -908,10 +1028,16 @@ class LcarsGeologicalMap(LcarsWidget):
                         self.clicked_unit = unit
                         self.clicked_age = age
                         
+                        # Format detailed age for display
+                        age_detail = self._format_age_detail(age)
+                        
                         print("Clicked geological unit:")
                         print("  Location: {:.5f}°N, {:.5f}°W".format(lat, abs(lon)))
                         print("  Unit: {}".format(unit))
-                        print("  Age: {}".format(age))
+                        if age_detail:
+                            print("  Age: {}".format(age_detail))
+                        else:
+                            print("  Age: {}".format(age))
                     else:
                         self.clicked_unit = "No unit at location"
                         self.clicked_age = None
