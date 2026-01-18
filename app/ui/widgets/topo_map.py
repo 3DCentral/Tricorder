@@ -395,6 +395,52 @@ class LcarsTopoMap(LcarsWidget):
         self.cam_x += dx / self.zoom
         self.cam_y += dy / self.zoom
     
+    def get_view_center(self):
+        """
+        Get the current center of the view in lat/lon
+        
+        Returns:
+            tuple: (lat, lon) of view center
+        """
+        # Calculate center pixel in screen coordinates
+        center_screen_x = self.display_width / 2
+        center_screen_y = self.display_height / 2
+        
+        # Convert to DEM pixel coordinates
+        center_pixel_x = -self.cam_x + center_screen_x / self.zoom
+        center_pixel_y = -self.cam_y + center_screen_y / self.zoom
+        
+        # Convert to lat/lon
+        coords = self._pixel_to_latlon(int(center_pixel_x), int(center_pixel_y))
+        if coords:
+            return coords
+        else:
+            # Fallback to data center
+            return (self.lat_min + self.lat_max) / 2, (self.lon_min + self.lon_max) / 2
+    
+    def set_view_from_center(self, lat, lon, zoom_index):
+        """
+        Set the view to center on a specific location with given zoom
+        
+        Args:
+            lat: Center latitude
+            lon: Center longitude
+            zoom_index: Index into zoom_levels array
+        """
+        self.current_zoom_index = zoom_index
+        self.zoom = self.zoom_levels[zoom_index]
+        
+        # Convert lat/lon to pixel coordinates
+        pixel_coords = self._latlon_to_pixel(lat, lon)
+        if not pixel_coords:
+            return
+        
+        pixel_x, pixel_y = pixel_coords
+        
+        # Center camera on this location
+        self.cam_x = -pixel_x + self.display_width / (2 * self.zoom)
+        self.cam_y = -pixel_y + self.display_height / (2 * self.zoom)
+    
     def zoom_in(self, factor=1.05):
         """Zoom in by given factor"""
         self.zoom *= factor
