@@ -1,5 +1,5 @@
 from datetime import datetime
-
+from ui.widgets.satellite_tracker import LcarsSatelliteTracker
 from ui.widgets.background import LcarsBackgroundImage, LcarsImage
 from ui.widgets.gifimage import LcarsGifImage
 from ui.widgets.lcars_widgets import *
@@ -119,6 +119,12 @@ class ScreenMain(LcarsScreen):
         # Store DEM and GeoJSON file paths for lazy loading
         self.dem_file_path = "assets/usgs/USGS_13_n38w078_20211220.tif"
         self.geojson_file_path = "assets/geology/va_geology_37_38.geojson"
+
+        # Satellite tracker for Atmospheric mode
+        self.satellite_tracker = LcarsSatelliteTracker((187, 299), (640, 480), 
+                                                       earth_map_path="assets/earth_map.jpg")
+        self.satellite_tracker.visible = False
+        all_sprites.add(self.satellite_tracker, layer=2)
 
         self.weather = LcarsImage("assets/atmosph.png", (187, 299))
         self.weather.visible = False
@@ -315,6 +321,7 @@ class ScreenMain(LcarsScreen):
         self.dashboard.visible = False
         self.topo_map.visible = False
         self.geological_map.visible = False  # NEW: Hide geological map
+        self.satellite_tracker.visible = False  # ADD THIS LINE
         self.weather.visible = False
         self.waterfall_display.visible = False
         self.frequency_selector.visible = False
@@ -322,6 +329,9 @@ class ScreenMain(LcarsScreen):
         self.microscope_gadget_ref.visible = False
         self.dashboard_ref.visible = False
     
+        # Reset scanning flags
+        self.emf_gadget.emf_scanning = False
+        
     def _switch_to_mode(self, gadget_name):
         """Switch to a specific gadget mode"""
         self._stop_all_cameras()
@@ -337,13 +347,13 @@ class ScreenMain(LcarsScreen):
         elif gadget_name == 'spectral':
             self.spectral_gadget.visible = True
         elif gadget_name == 'dashboard':
-            # Use new topo map instead of static image
             self.topo_map.visible = True
         elif gadget_name == 'weather':
-            self.weather.visible = True
-        
-        # Reset scanning flags
-        self.emf_gadget.emf_scanning = False
+            # Try satellite tracker first, fallback to static image
+            if hasattr(self, 'satellite_tracker'):
+                self.satellite_tracker.visible = True
+            else:
+                self.weather.visible = True
 
     def handleEvents(self, event, fpsClock):
         if event.type == pygame.MOUSEBUTTONDOWN:
@@ -936,8 +946,16 @@ class ScreenMain(LcarsScreen):
         self.micro.reviewing = 0
 
     def weatherHandler(self, item, event, clock):
-        """Switch to ATMOSPHERIC weather view"""
+        """Switch to ATMOSPHERIC satellite tracker view"""
         self._switch_to_mode('weather')
+        
+        # Try to show satellite tracker first
+        if hasattr(self, 'satellite_tracker'):
+            self.satellite_tracker.visible = True
+            self.weather.visible = False  # Hide fallback image
+        else:
+            # Fallback to static image if tracker not available
+            self.weather.visible = True
 
     def emfHandler(self, item, event, clock):
         """Switch to EMF spectrum analyzer view"""
