@@ -72,7 +72,11 @@ class LcarsSatelliteTracker(LcarsWidget):
             ('NOAA 20', 137.62, 'APT'),
             ('NOAA 21', 137.9125, 'APT'),
             ('METEOR-M2 3', 137.9, 'LRPT'),
-            ('METEOR-M2 4', 137.9, 'LRPT'),
+            ('METEOR-M2 4', 137.9, 'LRPT'),    # Ham Radio / Voice
+            ('ISS (ZARYA)', 145.800, 'FM/APRS/SSTV'),
+            ('SO-50', 145.850, 'FM Voice'),
+            ('AO-91', 145.960, 'FM Voice'),
+            ('AO-92', 145.880, 'FM Voice'),
         ]
         
         # Selected satellite (None = show all, or satellite name)
