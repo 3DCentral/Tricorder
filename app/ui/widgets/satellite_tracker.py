@@ -1,6 +1,7 @@
-"""Satellite tracker widget for real-time orbital visualization
+"""Enhanced Satellite tracker widget with target location crosshair and pass predictions
 
-Displays NOAA weather satellites with ground track overlay on Earth map
+Adds Richmond, Virginia crosshair as GPS stand-in and calculates when selected 
+satellite will be close enough for RTL-SDR reception.
 """
 import os
 import pygame
@@ -11,10 +12,11 @@ from datetime import datetime, timedelta
 
 class LcarsSatelliteTracker(LcarsWidget):
     """
-    Real-time satellite tracking widget
+    Real-time satellite tracking widget with ground station targeting
     
-    Displays weather satellites (NOAA 21) with orbital ground track
-    on an Earth map projection. Updates position in real-time.
+    Displays weather satellites with orbital ground track on Earth map.
+    Shows target location (Richmond, VA) and calculates pass predictions
+    for RTL-SDR reception planning.
     """
     
     def __init__(self, pos, size=(640, 480), earth_map_path=None):
@@ -29,23 +31,16 @@ class LcarsSatelliteTracker(LcarsWidget):
         self.display_width = size[0]
         self.display_height = size[1]
         self.image = pygame.Surface(size)
-        self.image.fill((0, 0, 0))  # Black background (LCARS style)
+        self.image.fill((0, 0, 0))
         
         LcarsWidget.__init__(self, None, pos, size)
         
         # Calculate map dimensions to maintain 2:1 aspect ratio
-        # Map should be 2:1, so if we have 640x480 display:
-        # - Map width = 640
-        # - Map height = 320 (to maintain 2:1 ratio)
-        # - Top bar = 80 pixels
-        # - Bottom bar = 80 pixels
         self.map_width = self.display_width
-        self.map_height = self.map_width // 2  # Maintain 2:1 ratio
-        
-        # Calculate vertical offset to center the map
+        self.map_height = self.map_width // 2
         self.map_offset_y = (self.display_height - self.map_height) // 2
         
-        # Info display areas (top and bottom bars)
+        # Info display areas
         self.top_bar_height = self.map_offset_y
         self.bottom_bar_height = self.display_height - self.map_height - self.map_offset_y
         
@@ -53,9 +48,18 @@ class LcarsSatelliteTracker(LcarsWidget):
             self.map_width, self.map_height, 
             self.top_bar_height, self.bottom_bar_height))
         
+        # TARGET LOCATION (Richmond, Virginia - GPS stand-in)
+        self.target_lat = 37.5407  # Richmond, VA latitude
+        self.target_lon = -77.4360  # Richmond, VA longitude
+        self.target_name = "Richmond, VA"
+        
+        # RTL-SDR reception parameters
+        self.min_elevation_angle = 20  # Minimum elevation for good reception (degrees)
+        self.max_reception_distance = 3000  # Max line-of-sight distance (km)
+        
         # Satellite tracking data
-        self.satellites = {}  # Dict of satellite name -> satellite object
-        self.satellite_info = {}  # Dict of satellite name -> current info
+        self.satellites = {}
+        self.satellite_info = {}
         self.ts = None
         self.earth_map = None
         self.earth_map_path = earth_map_path
@@ -63,29 +67,31 @@ class LcarsSatelliteTracker(LcarsWidget):
         # TLE cache configuration
         self.tle_url = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=weather&FORMAT=tle'
         self.cache_file = '/tmp/weather_satellites.tle'
-        self.cache_expiry_hours = 6  # Refresh TLE data every 6 hours
+        self.cache_expiry_hours = 6
         self.last_tle_update = None
         
-        # Satellites to track (RTL-SDR demodulatable weather satellites)
-        # Format: (Display Name, Frequency MHz, Modulation)
+        # Satellites to track (RTL-SDR demodulatable)
         self.satellite_list = [
             ('NOAA 20', 137.62, 'APT'),
             ('NOAA 21', 137.9125, 'APT'),
             ('METEOR-M2 3', 137.9, 'LRPT'),
-            ('METEOR-M2 4', 137.9, 'LRPT'),    # Ham Radio / Voice
+            ('METEOR-M2 4', 137.9, 'LRPT'),
             ('ISS (ZARYA)', 145.800, 'FM/APRS/SSTV'),
             ('SO-50', 145.850, 'FM Voice'),
             ('AO-91', 145.960, 'FM Voice'),
             ('AO-92', 145.880, 'FM Voice'),
         ]
         
-        # Selected satellite (None = show all, or satellite name)
+        # Selected satellite
         self.selected_satellite = None
         
-        # Mini trails for overview mode (when no satellite selected)
-        self.mini_trail_minutes_past = 20  # Show last 20 minutes
-        self.mini_trail_minutes_future = 20  # Show next 40 minutes
-        self.mini_trails = {}  # Dict of satellite name -> {'past': [...], 'future': [...]}
+        # Pass prediction data
+        self.next_pass_info = None  # Will store: time_until, duration, max_elevation
+        
+        # Trail data
+        self.mini_trail_minutes_past = 20
+        self.mini_trail_minutes_future = 20
+        self.mini_trails = {}
         
         # Display state for selected satellite
         self.current_lat = None
@@ -94,151 +100,103 @@ class LcarsSatelliteTracker(LcarsWidget):
         self.current_velocity_kms = None
         self.ground_track_points = []
         self.future_track_points = []
-        self.track_minutes_past = 90  # Show last 90 minutes of orbit
-        self.track_minutes_future = 180  # Show next 180 minutes (2 orbits)
+        self.pass_segments = []  # Info about each receivable pass
+        self.track_minutes_past = 90
+        self.track_minutes_future = 180
         
         # Animation state
-        self.pulse_phase = 0  # For satellite position pulse effect
+        self.pulse_phase = 0
         self.last_update_time = 0
-        
-        # Click-to-show-info feature
-        self.clicked_lat = None
-        self.clicked_lon = None
         
         # Load Earth map if provided
         if earth_map_path:
             self.load_earth_map(earth_map_path)
         
         # Initialize satellite tracking (lazy load)
-        # Don't load TLE data until widget is first displayed
         self.initialized = False
     
     def load_earth_map(self, image_path):
-        """
-        Load Earth map background image
-        
-        Args:
-            image_path: Path to Earth map (should be 2:1 equirectangular projection)
-            
-        Returns:
-            bool: True if loaded successfully
-        """
+        """Load Earth map background image"""
         try:
             print("Loading Earth map: {}".format(image_path))
-            
-            # Load and scale to map dimensions (2:1 ratio)
             self.earth_map = pygame.image.load(image_path).convert()
             self.earth_map = pygame.transform.scale(
                 self.earth_map, 
                 (self.map_width, self.map_height)
             )
-            
             self.earth_map_path = image_path
-            
             print("Earth map loaded successfully: {}x{}".format(
                 self.map_width, self.map_height))
             return True
-            
         except Exception as e:
             print("Failed to load Earth map {}: {}".format(image_path, e))
             return False
     
     def _download_tle_data(self):
-        """
-        Download fresh TLE data from CelesTrak
-        
-        Returns:
-            bool: True if download successful
-        """
+        """Download fresh TLE data from CelesTrak"""
         try:
             import requests
-            
-            print("Downloading fresh TLE data for NOAA 21...")
+            print("Downloading TLE data from {}".format(self.tle_url))
             response = requests.get(self.tle_url, timeout=10)
             response.raise_for_status()
             
-            # Verify we didn't get an HTML error page
-            if "<html" in response.text.lower():
-                raise ValueError("CelesTrak returned HTML instead of TLE")
-            
-            # Save to cache
             with open(self.cache_file, 'w') as f:
                 f.write(response.text)
             
             self.last_tle_update = datetime.now()
-            
-            print("TLE data updated successfully")
+            print("TLE data downloaded and cached")
             return True
-            
         except Exception as e:
-            print("TLE download failed: {}".format(e))
+            print("Failed to download TLE data: {}".format(e))
             return False
     
     def _load_tle_from_cache(self):
-        """
-        Load TLE data from cache file
-        
-        Returns:
-            bool: True if cache exists and is valid
-        """
+        """Load TLE data from cache file"""
         if not os.path.exists(self.cache_file):
             return False
         
-        # Check cache age
-        cache_age = datetime.now() - datetime.fromtimestamp(
-            os.path.getmtime(self.cache_file)
-        )
+        # Check if cache is expired
+        file_time = datetime.fromtimestamp(os.path.getmtime(self.cache_file))
+        age_hours = (datetime.now() - file_time).total_seconds() / 3600
         
-        if cache_age.total_seconds() > self.cache_expiry_hours * 3600:
-            print("TLE cache expired (age: {:.1f} hours)".format(
-                cache_age.total_seconds() / 3600))
+        if age_hours > self.cache_expiry_hours:
+            print("TLE cache expired ({:.1f} hours old)".format(age_hours))
             return False
         
-        print("Using cached TLE data (age: {:.1f} hours)".format(
-            cache_age.total_seconds() / 3600))
+        print("Using cached TLE data ({:.1f} hours old)".format(age_hours))
+        self.last_tle_update = file_time
         return True
     
     def initialize_tracking(self):
-        """
-        Initialize satellite tracking system
-        
-        Loads TLE data and sets up Skyfield for orbit calculations
-        
-        Returns:
-            bool: True if initialized successfully
-        """
+        """Initialize satellite tracking with TLE data"""
         try:
-            from skyfield.api import load, wgs84
+            from skyfield.api import load, wgs84, EarthSatellite
             
-            # Try to use cache first, download if needed
+            # Try cache first, download if needed
             if not self._load_tle_from_cache():
                 if not self._download_tle_data():
-                    # Download failed, check if cache exists as fallback
-                    if not os.path.exists(self.cache_file):
-                        print("ERROR: No TLE data available (download failed, no cache)")
-                        return False
-                    print("Using old cached TLE data as fallback")
+                    print("ERROR: Could not load or download TLE data")
+                    return False
             
-            # Load TLE data with Skyfield
-            print("Loading TLE data with Skyfield...")
-            all_satellites = load.tle_file(self.cache_file)
+            # Load TLE data
+            satellites_data = load.tle_file(self.cache_file)
+            print("Loaded {} satellites from TLE file".format(len(satellites_data)))
             
-            if not all_satellites:
+            if len(satellites_data) == 0:
                 print("ERROR: No satellites found in TLE file")
                 return False
             
             # Build dictionary of satellites by name
-            sat_by_name = {sat.name: sat for sat in all_satellites}
+            sat_by_name = {sat.name: sat for sat in satellites_data}
             
             # Find our weather satellites
             self.satellites = {}
             for sat_name, freq, mod in self.satellite_list:
-                # Try exact match first
                 if sat_name in sat_by_name:
                     self.satellites[sat_name] = sat_by_name[sat_name]
                     print("Found satellite: {} ({} MHz {})".format(sat_name, freq, mod))
                 else:
-                    # Try partial match (e.g., "NOAA 15" might be "NOAA 15 [+]")
+                    # Try partial match
                     found = False
                     for name, sat in sat_by_name.items():
                         if sat_name in name or name in sat_name:
@@ -247,7 +205,6 @@ class LcarsSatelliteTracker(LcarsWidget):
                                 sat_name, name, freq, mod))
                             found = True
                             break
-                    
                     if not found:
                         print("Warning: Satellite '{}' not found in TLE data".format(sat_name))
             
@@ -274,228 +231,417 @@ class LcarsSatelliteTracker(LcarsWidget):
             traceback.print_exc()
             return False
     
-    def _latlon_to_screen(self, lat, lon):
+    def _calculate_distance_and_elevation(self, sat_lat, sat_lon, sat_alt_km):
         """
-        Convert latitude/longitude to screen pixel coordinates
-        
-        Uses equirectangular projection (simple linear mapping)
-        Accounts for map offset (top/bottom bars)
+        Calculate distance and elevation angle from target to satellite
         
         Args:
-            lat: Latitude in degrees (-90 to 90)
-            lon: Longitude in degrees (-180 to 180)
+            sat_lat: Satellite latitude (degrees)
+            sat_lon: Satellite longitude (degrees)
+            sat_alt_km: Satellite altitude (km)
             
         Returns:
-            tuple: (x, y) screen coordinates
+            tuple: (distance_km, elevation_angle_deg)
         """
-        # Map lon from -180,180 to 0,map_width
-        x = int((lon + 180) * (self.map_width / 360))
+        from skyfield.api import wgs84
         
-        # Map lat from 90,-90 to 0,map_height (inverted Y axis)
-        y = int((90 - lat) * (self.map_height / 180))
+        # Earth radius
+        R = 6371.0  # km
         
-        # Add vertical offset for top bar
-        y += self.map_offset_y
+        # Convert to radians
+        lat1 = np.radians(self.target_lat)
+        lon1 = np.radians(self.target_lon)
+        lat2 = np.radians(sat_lat)
+        lon2 = np.radians(sat_lon)
         
-        # Clamp to screen bounds
-        x = max(0, min(self.display_width - 1, x))
-        y = max(self.map_offset_y, min(self.map_offset_y + self.map_height - 1, y))
+        # Haversine formula for great circle distance
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
+        c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+        ground_distance = R * c
         
-        return x, y
+        # Calculate elevation angle
+        # This is simplified - proper calculation would account for Earth curvature
+        altitude_diff = sat_alt_km
+        elevation_rad = np.arctan2(altitude_diff, ground_distance)
+        elevation_deg = np.degrees(elevation_rad)
+        
+        # Total slant range distance
+        slant_range = np.sqrt(ground_distance**2 + altitude_diff**2)
+        
+        return slant_range, elevation_deg
     
-    def _screen_to_latlon(self, x, y):
+    def _predict_next_pass(self):
         """
-        Convert screen coordinates to latitude/longitude
+        Predict when selected satellite will next be receivable from target location
         
-        Args:
-            x: Screen X coordinate
-            y: Screen Y coordinate
-            
         Returns:
-            tuple: (lat, lon) in degrees
+            dict: {'time_until': timedelta, 'duration': timedelta, 'max_elevation': float}
+                  or None if no good pass in next 24 hours
         """
-        # Remove vertical offset
-        y_map = y - self.map_offset_y
+        if not self.selected_satellite or self.selected_satellite not in self.satellites:
+            return None
         
-        # Map x from 0,map_width to -180,180
-        lon = (x / self.map_width) * 360 - 180
-        
-        # Map y from 0,map_height to 90,-90 (inverted Y axis)
-        lat = 90 - (y_map / self.map_height) * 180
-        
-        return lat, lon
+        try:
+            from skyfield.api import wgs84
+            
+            satellite = self.satellites[self.selected_satellite]
+            
+            # Create ground station at target location
+            ground_station = wgs84.latlon(self.target_lat, self.target_lon)
+            
+            # Look ahead 24 hours
+            t0 = self.ts.now()
+            t1 = self.ts.ut1_jd(t0.ut1 + 1.0)  # +1 day
+            
+            # Find passes using skyfield's built-in function
+            t, events = satellite.find_events(
+                ground_station, 
+                t0, 
+                t1, 
+                altitude_degrees=self.min_elevation_angle
+            )
+            
+            # events: 0 = rise, 1 = culminate (max elevation), 2 = set
+            
+            # Find first complete pass (rise -> culminate -> set)
+            for i in range(len(events) - 2):
+                if events[i] == 0 and events[i+1] == 1 and events[i+2] == 2:
+                    # Found a complete pass
+                    rise_time = t[i].utc_datetime()
+                    culminate_time = t[i+1].utc_datetime()
+                    set_time = t[i+2].utc_datetime()
+                    
+                    # Calculate max elevation at culmination
+                    difference = satellite - ground_station
+                    topocentric = difference.at(t[i+1])
+                    alt, az, distance = topocentric.altaz()
+                    max_elevation = alt.degrees
+                    
+                    # Time until pass starts
+                    time_until = rise_time - datetime.now().replace(tzinfo=rise_time.tzinfo)
+                    
+                    # Pass duration
+                    duration = set_time - rise_time
+                    
+                    return {
+                        'time_until': time_until,
+                        'duration': duration,
+                        'max_elevation': max_elevation,
+                        'rise_time': rise_time,
+                        'set_time': set_time
+                    }
+            
+            return None  # No good pass found
+            
+        except Exception as e:
+            print("Error predicting pass: {}".format(e))
+            return None
     
     def update_satellite_positions(self):
-        """
-        Update all satellite positions
-        
-        Calculates current positions for all satellites and mini trails
-        """
-        if not self.initialized or not self.satellites or not self.ts:
+        """Update current satellite positions and predictions"""
+        if not self.satellites or not self.ts:
             return
         
         try:
             from skyfield.api import wgs84
             
-            # Get current time
-            now = self.ts.now()
+            t = self.ts.now()
+            self.pulse_phase = (self.pulse_phase + 0.1) % (2 * np.pi)
             
-            # Update position for all satellites
+            # Update all satellite positions
             self.satellite_info = {}
-            self.mini_trails = {}
-            
-            for sat_name, sat in self.satellites.items():
-                # Calculate current position
-                geocentric = sat.at(now)
+            for sat_name, satellite in self.satellites.items():
+                geocentric = satellite.at(t)
                 subpoint = wgs84.subpoint(geocentric)
                 
-                # Store info
                 self.satellite_info[sat_name] = {
                     'lat': subpoint.latitude.degrees,
                     'lon': subpoint.longitude.degrees,
                     'alt_km': subpoint.elevation.km,
-                    'velocity_kms': 7.8,  # Approximate LEO velocity
-                }
-                
-                # Calculate mini trails for overview mode
-                # (always calculate these so they're ready)
-                past_trail = []
-                future_trail = []
-                
-                # Past trail (sample every 2 minutes for smoother mini trail)
-                for i in range(0, self.mini_trail_minutes_past + 1, 2):
-                    time_step = now - timedelta(minutes=i)
-                    geo = sat.at(time_step)
-                    sub = wgs84.subpoint(geo)
-                    screen_pos = self._latlon_to_screen(
-                        sub.latitude.degrees,
-                        sub.longitude.degrees
-                    )
-                    past_trail.append(screen_pos)
-                
-                # Future trail (sample every 2 minutes for smoother mini trail, start at 0)
-                for i in range(0, self.mini_trail_minutes_future + 1, 2):
-                    time_step = now + timedelta(minutes=i)
-                    geo = sat.at(time_step)
-                    sub = wgs84.subpoint(geo)
-                    screen_pos = self._latlon_to_screen(
-                        sub.latitude.degrees,
-                        sub.longitude.degrees
-                    )
-                    future_trail.append(screen_pos)
-                
-                self.mini_trails[sat_name] = {
-                    'past': past_trail,
-                    'future': future_trail
+                    'velocity_kms': geocentric.velocity.km_per_s
                 }
             
-            # If a satellite is selected, calculate detailed track
-            if self.selected_satellite and self.selected_satellite in self.satellites:
-                sat = self.satellites[self.selected_satellite]
-                info = self.satellite_info[self.selected_satellite]
-                
-                # Store selected satellite info
-                self.current_lat = info['lat']
-                self.current_lon = info['lon']
-                self.current_alt_km = info['alt_km']
-                self.current_velocity_kms = info['velocity_kms']
-                
-                # Calculate PAST ground track (full detail)
-                self.ground_track_points = []
-                for i in range(0, self.track_minutes_past + 1, 2):
-                    time_step = now - timedelta(minutes=i)
-                    geo = sat.at(time_step)
-                    sub = wgs84.subpoint(geo)
+            # Update mini trails for all satellites (overview mode)
+            if not self.selected_satellite:
+                self.mini_trails = {}
+                for sat_name, satellite in self.satellites.items():
+                    past_points = []
+                    future_points = []
                     
+                    # Past trail
+                    for minutes_ago in range(self.mini_trail_minutes_past, 0, -2):
+                        t_past = self.ts.ut1_jd(t.ut1 - minutes_ago / (24 * 60))
+                        geocentric_past = satellite.at(t_past)
+                        sub_past = wgs84.subpoint(geocentric_past)
+                        screen_pos = self._latlon_to_screen(
+                            sub_past.latitude.degrees,
+                            sub_past.longitude.degrees
+                        )
+                        past_points.append(screen_pos)
+                    
+                    # Future trail
+                    for minutes_ahead in range(2, self.mini_trail_minutes_future, 2):
+                        t_future = self.ts.ut1_jd(t.ut1 + minutes_ahead / (24 * 60))
+                        geocentric_future = satellite.at(t_future)
+                        sub_future = wgs84.subpoint(geocentric_future)
+                        screen_pos = self._latlon_to_screen(
+                            sub_future.latitude.degrees,
+                            sub_future.longitude.degrees
+                        )
+                        future_points.append(screen_pos)
+                    
+                    self.mini_trails[sat_name] = {
+                        'past': past_points,
+                        'future': future_points
+                    }
+            
+            # Update detailed track for selected satellite
+            if self.selected_satellite and self.selected_satellite in self.satellites:
+                satellite = self.satellites[self.selected_satellite]
+                geocentric = satellite.at(t)
+                subpoint = wgs84.subpoint(geocentric)
+                
+                self.current_lat = subpoint.latitude.degrees
+                self.current_lon = subpoint.longitude.degrees
+                self.current_alt_km = subpoint.elevation.km
+                
+                vel = geocentric.velocity.km_per_s
+                self.current_velocity_kms = np.sqrt(vel[0]**2 + vel[1]**2 + vel[2]**2)
+                
+                # Calculate past ground track
+                self.ground_track_points = []
+                for minutes_ago in range(self.track_minutes_past, 0, -1):
+                    t_past = self.ts.ut1_jd(t.ut1 - minutes_ago / (24 * 60))
+                    geocentric_past = satellite.at(t_past)
+                    sub = wgs84.subpoint(geocentric_past)
                     screen_pos = self._latlon_to_screen(
                         sub.latitude.degrees,
                         sub.longitude.degrees
                     )
                     self.ground_track_points.append(screen_pos)
                 
-                # Calculate FUTURE ground track (full detail)
+                # Calculate future ground track - extend to show next 2 passes
                 self.future_track_points = []
-                for i in range(0, self.track_minutes_future + 1, 2):  # Start at 0 instead of 2
-                    time_step = now + timedelta(minutes=i)
-                    geo = sat.at(time_step)
-                    sub = wgs84.subpoint(geo)
+                max_future_minutes = 1440  # Search up to 24 hours ahead
+                self.pass_segments = []  # Store info about each receivable pass
+                
+                current_pass = None
+                passes_found = 0
+                max_passes = 2  # Only show next 2 passes
+                stop_at_minute = None  # Will be set after finding passes
+                
+                for minutes_ahead in range(1, max_future_minutes):
+                    # Stop drawing track shortly after the second pass ends
+                    if stop_at_minute is not None and minutes_ahead > stop_at_minute:
+                        break
+                    
+                    t_future = self.ts.ut1_jd(t.ut1 + minutes_ahead / (24 * 60))
+                    geocentric_future = satellite.at(t_future)
+                    sub = wgs84.subpoint(geocentric_future)
                     
                     screen_pos = self._latlon_to_screen(
                         sub.latitude.degrees,
                         sub.longitude.degrees
                     )
                     self.future_track_points.append(screen_pos)
+                    
+                    # Check if satellite is close enough to target for reception
+                    distance, elevation = self._calculate_distance_and_elevation(
+                        sub.latitude.degrees,
+                        sub.longitude.degrees,
+                        sub.elevation.km
+                    )
+                    
+                    # Track receivable passes
+                    is_receivable = (elevation >= self.min_elevation_angle and 
+                                   distance <= self.max_reception_distance)
+                    
+                    if is_receivable:
+                        if current_pass is None:
+                            # Start of a new pass
+                            current_pass = {
+                                'start_minute': minutes_ahead,
+                                'max_elevation': elevation,
+                                'max_elevation_minute': minutes_ahead,
+                                'end_minute': minutes_ahead
+                            }
+                        else:
+                            # Continue current pass
+                            current_pass['end_minute'] = minutes_ahead
+                            if elevation > current_pass['max_elevation']:
+                                current_pass['max_elevation'] = elevation
+                                current_pass['max_elevation_minute'] = minutes_ahead
+                    else:
+                        if current_pass is not None:
+                            # End of pass - save it
+                            current_pass['duration'] = current_pass['end_minute'] - current_pass['start_minute']
+                            self.pass_segments.append(current_pass)
+                            passes_found += 1
+                            
+                            # After finding 2 passes, set stop point 30 min after last pass
+                            if passes_found >= max_passes:
+                                stop_at_minute = current_pass['end_minute'] + 30
+                            
+                            current_pass = None
+                
+                # Save final pass if we ended in the middle of one
+                if current_pass is not None and passes_found < max_passes:
+                    current_pass['duration'] = current_pass['end_minute'] - current_pass['start_minute']
+                    self.pass_segments.append(current_pass)
+                
+                # Predict next pass over target location
+                self.next_pass_info = self._predict_next_pass()
             else:
-                # No selection - clear detailed track data
                 self.current_lat = None
                 self.current_lon = None
                 self.current_alt_km = None
                 self.current_velocity_kms = None
                 self.ground_track_points = []
                 self.future_track_points = []
+                self.next_pass_info = None
+                self.pass_segments = []
             
         except Exception as e:
             print("Error updating satellite positions: {}".format(e))
     
+    def _latlon_to_screen(self, lat, lon):
+        """Convert latitude/longitude to screen pixel coordinates"""
+        x = int((lon + 180) * (self.map_width / 360))
+        y = int((90 - lat) * (self.map_height / 180)) + self.map_offset_y
+        return (x, y)
+    
+    def _screen_to_latlon(self, x, y):
+        """Convert screen coordinates to latitude/longitude"""
+        lon = (x / self.map_width) * 360 - 180
+        lat = 90 - ((y - self.map_offset_y) / self.map_height) * 180
+        return (lat, lon)
+    
     def _draw_earth_map(self, surface):
-        """Draw the Earth map background with proper positioning"""
+        """Draw the Earth map background"""
         if self.earth_map:
-            # Blit map at vertical offset (leaving top and bottom bars black)
             surface.blit(self.earth_map, (0, self.map_offset_y))
         else:
-            # Draw placeholder grid if no map available
-            # Fill entire surface with black
             surface.fill((0, 0, 0))
-            
-            # Draw latitude lines (only in map area)
+            # Draw grid
             for lat in range(-90, 91, 30):
                 y = int((90 - lat) * (self.map_height / 180)) + self.map_offset_y
                 pygame.draw.line(surface, (40, 40, 40), 
                                (0, y), (self.display_width, y), 1)
-            
-            # Draw longitude lines (only in map area)
             for lon in range(-180, 181, 30):
                 x = int((lon + 180) * (self.map_width / 360))
                 pygame.draw.line(surface, (40, 40, 40),
                                (x, self.map_offset_y), 
                                (x, self.map_offset_y + self.map_height), 1)
     
+    def _draw_target_crosshair(self, surface):
+        """Draw crosshair at target location (Richmond, VA)"""
+        pos = self._latlon_to_screen(self.target_lat, self.target_lon)
+        
+        # Draw crosshair
+        crosshair_size = 15
+        line_color = (0, 255, 0)  # Green for ground station
+        
+        # Vertical line
+        pygame.draw.line(surface, line_color,
+                        (pos[0], pos[1] - crosshair_size),
+                        (pos[0], pos[1] + crosshair_size), 2)
+        # Horizontal line
+        pygame.draw.line(surface, line_color,
+                        (pos[0] - crosshair_size, pos[1]),
+                        (pos[0] + crosshair_size, pos[1]), 2)
+        
+        # Draw circle around crosshair
+        pygame.draw.circle(surface, line_color, pos, 8, 2)
+    
     def _draw_ground_track(self, surface):
-        """Draw the satellite's ground track (orbital path)"""
+        """Draw the satellite's past ground track"""
         if len(self.ground_track_points) < 2:
             return
         
-        # Draw PAST track in yellow with date line wrap-around protection
         for i in range(len(self.ground_track_points) - 1):
             p1 = self.ground_track_points[i]
             p2 = self.ground_track_points[i + 1]
             
-            # Only draw if line doesn't cross the date line
-            # (avoid drawing line across entire screen)
             if abs(p1[0] - p2[0]) < self.display_width / 2:
-                # Fade older parts of the track
-                alpha = int(255 * (1 - i / len(self.ground_track_points)))
-                color = (255, 255, 0)  # Yellow (past track)
-                
+                color = (255, 255, 0)  # Yellow
                 pygame.draw.line(surface, color, p1, p2, 2)
     
     def _draw_future_track(self, surface):
-        """Draw the satellite's predicted future ground track"""
+        """Draw the satellite's predicted future ground track with reception zones highlighted"""
         if len(self.future_track_points) < 2:
             return
         
-        # Draw FUTURE track in cyan with date line wrap-around protection
-        for i in range(len(self.future_track_points) - 1):
-            p1 = self.future_track_points[i]
-            p2 = self.future_track_points[i + 1]
+        try:
+            from skyfield.api import wgs84
             
-            # Only draw if line doesn't cross the date line
-            if abs(p1[0] - p2[0]) < self.display_width / 2:
-                # Cyan for future prediction
-                color = (0, 255, 255)  # Cyan (future track)
+            if not self.selected_satellite or self.selected_satellite not in self.satellites:
+                return
+            
+            satellite = self.satellites[self.selected_satellite]
+            t = self.ts.now()
+            
+            # Draw future track with color coding for receivability
+            for i in range(len(self.future_track_points) - 1):
+                p1 = self.future_track_points[i]
+                p2 = self.future_track_points[i + 1]
                 
-                # Optional: Make it slightly dashed to distinguish from past
-                pygame.draw.line(surface, color, p1, p2, 2)
+                # Only draw if line doesn't cross the date line
+                if abs(p1[0] - p2[0]) < self.display_width / 2:
+                    # Calculate position at this point in the future track
+                    minutes_ahead = i + 1
+                    t_future = self.ts.ut1_jd(t.ut1 + minutes_ahead / (24 * 60))
+                    geocentric_future = satellite.at(t_future)
+                    sub = wgs84.subpoint(geocentric_future)
+                    
+                    # Check if receivable at this point
+                    distance, elevation = self._calculate_distance_and_elevation(
+                        sub.latitude.degrees,
+                        sub.longitude.degrees,
+                        sub.elevation.km
+                    )
+                    
+                    # Color code: green if receivable, cyan if not
+                    if elevation >= self.min_elevation_angle and distance <= self.max_reception_distance:
+                        color = (0, 255, 0)  # Green - receivable zone!
+                        thickness = 3  # Thicker line for receivable portions
+                    else:
+                        color = (0, 255, 255)  # Cyan - future track
+                        thickness = 2
+                    
+                    pygame.draw.line(surface, color, p1, p2, thickness)
+            
+            # Draw markers at the peak of each pass
+            font_tiny = pygame.font.Font("assets/swiss911.ttf", 12)
+            for i, pass_info in enumerate(self.pass_segments[:2]):  # Mark only next 2 passes
+                max_elev_minute = pass_info['max_elevation_minute']
+                
+                if max_elev_minute < len(self.future_track_points):
+                    marker_pos = self.future_track_points[max_elev_minute]
+                    
+                    # Draw a circle marker at peak elevation
+                    pygame.draw.circle(surface, (255, 255, 0), marker_pos, 6, 2)
+                    pygame.draw.circle(surface, (0, 255, 0), marker_pos, 3)
+                    
+                    # Draw pass number label
+                    label = font_tiny.render(str(i + 1), True, (255, 255, 0))
+                    label_rect = label.get_rect(center=(marker_pos[0], marker_pos[1] - 12))
+                    
+                    # Background for label
+                    bg_surf = pygame.Surface((label_rect.width + 4, label_rect.height + 2))
+                    bg_surf.set_alpha(200)
+                    bg_surf.fill((0, 0, 0))
+                    surface.blit(bg_surf, (label_rect.x - 2, label_rect.y - 1))
+                    surface.blit(label, label_rect)
+                    
+        except Exception as e:
+            # Fallback to simple cyan line if calculation fails
+            for i in range(len(self.future_track_points) - 1):
+                p1 = self.future_track_points[i]
+                p2 = self.future_track_points[i + 1]
+                if abs(p1[0] - p2[0]) < self.display_width / 2:
+                    pygame.draw.line(surface, (0, 255, 255), p1, p2, 2)
     
     def _draw_mini_trails(self, surface):
         """Draw mini trails for all satellites in overview mode"""
@@ -503,53 +649,44 @@ class LcarsSatelliteTracker(LcarsWidget):
             return
         
         for sat_name, trails in self.mini_trails.items():
-            # Draw past trail (thin, yellow)
+            # Draw past trail
             past_points = trails['past']
             if len(past_points) > 1:
                 for i in range(len(past_points) - 1):
                     p1 = past_points[i]
                     p2 = past_points[i + 1]
-                    
-                    # Date line wrap protection
                     if abs(p1[0] - p2[0]) < self.display_width / 2:
-                        pygame.draw.line(surface, (200, 200, 0), p1, p2, 1)  # Dim yellow
+                        pygame.draw.line(surface, (200, 200, 0), p1, p2, 1)
             
-            # Draw future trail (thin, cyan)
+            # Draw future trail
             future_points = trails['future']
             if len(future_points) > 1:
                 for i in range(len(future_points) - 1):
                     p1 = future_points[i]
                     p2 = future_points[i + 1]
-                    
-                    # Date line wrap protection
                     if abs(p1[0] - p2[0]) < self.display_width / 2:
-                        pygame.draw.line(surface, (0, 200, 200), p1, p2, 1)  # Dim cyan
+                        pygame.draw.line(surface, (0, 200, 200), p1, p2, 1)
     
     def _draw_all_satellites(self, surface):
         """Draw all satellite positions when none is selected"""
         if not self.satellite_info:
             return
         
-        font_small = pygame.font.Font("assets/swiss911.ttf", 12)
+        font_small = pygame.font.Font("assets/swiss911.ttf", 16)  # Increased from 12
         
         for sat_name, info in self.satellite_info.items():
             pos = self._latlon_to_screen(info['lat'], info['lon'])
             
-            # Draw satellite dot (smaller than selected)
-            pygame.draw.circle(surface, (255, 153, 0), pos, 4)  # Orange
-            pygame.draw.circle(surface, (255, 255, 255), pos, 2)  # White center
+            pygame.draw.circle(surface, (255, 153, 0), pos, 4)
+            pygame.draw.circle(surface, (255, 255, 255), pos, 2)
             
-            # Draw label next to satellite
             label_text = font_small.render(sat_name, True, (255, 153, 0))
             label_rect = label_text.get_rect(topleft=(pos[0] + 6, pos[1] - 6))
             
-            # Background for label
             bg_surf = pygame.Surface((label_rect.width + 4, label_rect.height + 2))
             bg_surf.set_alpha(180)
             bg_surf.fill((0, 0, 0))
             surface.blit(bg_surf, (label_rect.x - 2, label_rect.y - 1))
-            
-            # Draw label
             surface.blit(label_text, label_rect)
     
     def _draw_other_satellites(self, surface):
@@ -557,30 +694,24 @@ class LcarsSatelliteTracker(LcarsWidget):
         if not self.satellite_info or not self.selected_satellite:
             return
         
-        font_small = pygame.font.Font("assets/swiss911.ttf", 10)
+        font_small = pygame.font.Font("assets/swiss911.ttf", 14)  # Increased from 10
         
         for sat_name, info in self.satellite_info.items():
-            # Skip the selected satellite (it's drawn separately)
             if sat_name == self.selected_satellite:
                 continue
             
             pos = self._latlon_to_screen(info['lat'], info['lon'])
             
-            # Draw satellite dot (dimmer, smaller)
-            pygame.draw.circle(surface, (150, 100, 0), pos, 3)  # Dim orange
-            pygame.draw.circle(surface, (200, 200, 200), pos, 1)  # Light gray center
+            pygame.draw.circle(surface, (150, 100, 0), pos, 3)
+            pygame.draw.circle(surface, (200, 200, 200), pos, 1)
             
-            # Draw label next to satellite (smaller, dimmer)
             label_text = font_small.render(sat_name, True, (150, 100, 0))
             label_rect = label_text.get_rect(topleft=(pos[0] + 5, pos[1] - 5))
             
-            # Background for label
             bg_surf = pygame.Surface((label_rect.width + 3, label_rect.height + 2))
             bg_surf.set_alpha(150)
             bg_surf.fill((0, 0, 0))
             surface.blit(bg_surf, (label_rect.x - 1, label_rect.y - 1))
-            
-            # Draw label
             surface.blit(label_text, label_rect)
     
     def _draw_satellite_position(self, surface):
@@ -593,135 +724,140 @@ class LcarsSatelliteTracker(LcarsWidget):
         # Pulse effect
         pulse_size = int(6 + 2 * np.sin(self.pulse_phase))
         
-        # Draw satellite dot (larger when selected)
-        pygame.draw.circle(surface, (255, 0, 0), pos, pulse_size)  # Red outer
-        pygame.draw.circle(surface, (255, 255, 255), pos, 3)  # White center
+        pygame.draw.circle(surface, (255, 0, 0), pos, pulse_size)
+        pygame.draw.circle(surface, (255, 255, 255), pos, 2)
         
-        # Update pulse animation
-        self.pulse_phase += 0.1
-        if self.pulse_phase > 2 * np.pi:
-            self.pulse_phase = 0
+        # Draw line to target if satellite is selected
+        if self.selected_satellite:
+            target_pos = self._latlon_to_screen(self.target_lat, self.target_lon)
+            
+            # Calculate distance and elevation
+            distance, elevation = self._calculate_distance_and_elevation(
+                self.current_lat, self.current_lon, self.current_alt_km
+            )
+            
+            # Color code the line based on receivability
+            if elevation >= self.min_elevation_angle and distance <= self.max_reception_distance:
+                line_color = (0, 255, 0)  # Green - receivable now!
+            else:
+                line_color = (100, 100, 100)  # Gray - not receivable
+            
+            pygame.draw.line(surface, line_color, pos, target_pos, 1)
     
     def _draw_info_overlay(self, surface):
-        """Draw satellite information in top and bottom bars"""
-        font_large = pygame.font.Font("assets/swiss911.ttf", 20)
-        font_small = pygame.font.Font("assets/swiss911.ttf", 16)
+        """Draw text information overlay"""
+        font_medium = pygame.font.Font("assets/swiss911.ttf", 20)  # Increased from 16
+        font_small = pygame.font.Font("assets/swiss911.ttf", 16)  # Increased from 12
         
-        # LCARS colors
-        title_color = (255, 153, 0)  # Orange
-        text_color = (255, 255, 0)  # Yellow
-        
-        # === TOP BAR ===
         if self.selected_satellite:
-            # Show selected satellite name
-            # Find frequency and modulation for this satellite
+            # Top bar - satellite info
+            sat_name = self.selected_satellite
             freq = None
             mod = None
-            for sat_name, f, m in self.satellite_list:
-                if sat_name == self.selected_satellite:
+            for name, f, m in self.satellite_list:
+                if name == sat_name:
                     freq = f
                     mod = m
                     break
             
-            title_text = font_large.render(
-                "{} ({} MHz {})".format(self.selected_satellite, freq, mod),
-                True, title_color
-            )
-        else:
-            # Show "all satellites" mode
-            title_text = font_large.render(
-                "WEATHER SATELLITES ({})".format(len(self.satellites)),
-                True, title_color
-            )
-        
-        surface.blit(title_text, (10, 10))
-        
-        # Draw current time (right side)
-        current_time = datetime.now().strftime("%H:%M:%S UTC")
-        time_text = font_small.render(current_time, True, text_color)
-        time_rect = time_text.get_rect(topright=(self.display_width - 10, 15))
-        surface.blit(time_text, time_rect)
-        
-        # === BOTTOM BAR ===
-        bottom_y = self.map_offset_y + self.map_height + 10
-        
-        if self.selected_satellite and self.current_lat is not None:
-            # Show detailed telemetry for selected satellite
-            # Line 1: Position
-            pos_text = "Position: {:.2f}°N, {:.2f}°{}".format(
-                self.current_lat, 
-                abs(self.current_lon),
-                'E' if self.current_lon >= 0 else 'W'
-            )
-            text1 = font_small.render(pos_text, True, text_color)
+            info_text = "{} - {:.4f} MHz ({})".format(sat_name, freq, mod)
+            text = font_medium.render(info_text, True, (255, 255, 255))
+            surface.blit(text, (10, 10))
             
-            # Line 2: Altitude and velocity
-            alt_text = "Altitude: {:.0f} km | Velocity: ~{:.1f} km/s".format(
-                self.current_alt_km if self.current_alt_km else 0,
-                self.current_velocity_kms if self.current_velocity_kms else 0
-            )
-            text2 = font_small.render(alt_text, True, text_color)
+            if self.current_alt_km and self.current_velocity_kms:
+                detail_text = "Alt: {:.0f} km  Vel: {:.2f} km/s".format(
+                    self.current_alt_km, self.current_velocity_kms
+                )
+                text2 = font_small.render(detail_text, True, (153, 153, 255))
+                surface.blit(text2, (10, 35))
             
-            # Line 3: Track legend
-            legend_text = "Track: "
-            text3 = font_small.render(legend_text, True, text_color)
+            # Bottom bar - show all upcoming passes
+            if self.pass_segments and len(self.pass_segments) > 0:
+                y_offset = self.display_height - 25
+                
+                for i, pass_info in enumerate(self.pass_segments[:2]):  # Show only next 2 passes
+                    start_min = pass_info['start_minute']
+                    duration_min = pass_info['duration']
+                    max_elev = pass_info['max_elevation']
+                    
+                    # Determine color based on how soon
+                    if start_min < 0:
+                        # Pass is happening now!
+                        pass_text = "PASS {} IN PROGRESS! (max elev: {:.0f}°, dur: {:.0f} min)".format(
+                            i + 1, max_elev, duration_min
+                        )
+                        pass_color = (0, 255, 0)  # Bright green
+                    elif start_min < 60:
+                        # Less than 1 hour
+                        pass_text = "Pass {} in {} min (max elev: {:.0f}°, dur: {:.0f} min)".format(
+                            i + 1, start_min, max_elev, duration_min
+                        )
+                        pass_color = (255, 255, 0)  # Yellow
+                    elif start_min < 360:
+                        # Less than 6 hours
+                        hours = start_min // 60
+                        mins = start_min % 60
+                        pass_text = "Pass {} in {}h{}m (max elev: {:.0f}°, dur: {:.0f} min)".format(
+                            i + 1, hours, mins, max_elev, duration_min
+                        )
+                        pass_color = (153, 153, 255)  # Light blue
+                    else:
+                        # More than 6 hours
+                        hours = start_min // 60
+                        pass_text = "Pass {} in ~{}h (max elev: {:.0f}°, dur: {:.0f} min)".format(
+                            i + 1, hours, max_elev, duration_min
+                        )
+                        pass_color = (100, 100, 200)  # Dimmer blue
+                    
+                    text_pass = font_small.render(pass_text, True, pass_color)
+                    surface.blit(text_pass, (10, y_offset))
+                    y_offset -= 20  # Move up for next pass
+                
+            else:
+                no_pass_text = "No good passes in next 24 hours"
+                text3 = font_small.render(no_pass_text, True, (255, 100, 100))
+                surface.blit(text3, (10, self.display_height - 25))
             
-            # Draw texts in bottom bar
-            surface.blit(text1, (10, bottom_y))
-            surface.blit(text2, (10, bottom_y + 20))
-            surface.blit(text3, (10, bottom_y + 40))
-            
-            # Draw colored track indicators after "Track: " text
-            legend_x = 10 + text3.get_width() + 5
-            legend_y = bottom_y + 43
-            
-            # Yellow line for past
-            pygame.draw.line(surface, (255, 255, 0), 
-                            (legend_x, legend_y), 
-                            (legend_x + 30, legend_y), 3)
-            past_label = font_small.render("Past", True, (255, 255, 0))
-            surface.blit(past_label, (legend_x + 35, bottom_y + 40))
-            
-            # Cyan line for future
-            future_x = legend_x + 100
-            pygame.draw.line(surface, (0, 255, 255), 
-                            (future_x, legend_y), 
-                            (future_x + 30, legend_y), 3)
-            future_label = font_small.render("Future (2 orbits)", True, (0, 255, 255))
-            surface.blit(future_label, (future_x + 35, bottom_y + 40))
-        else:
-            # Show satellite list when none selected
-            help_text = "Click on a satellite to see orbital track"
-            text1 = font_small.render(help_text, True, text_color)
-            surface.blit(text1, (10, bottom_y))
-            
-            # List satellites with frequencies
-            y_offset = bottom_y + 20
-            for sat_name, freq, mod in self.satellite_list:
-                if sat_name in self.satellites:
-                    sat_text = "{}: {} MHz ({})".format(sat_name, freq, mod)
-                    color = (255, 153, 0)  # Orange if available
+            # Current distance/elevation to target
+            if self.current_lat and self.current_lon and self.current_alt_km:
+                distance, elevation = self._calculate_distance_and_elevation(
+                    self.current_lat, self.current_lon, self.current_alt_km
+                )
+                
+                status_text = "Distance to {}: {:.0f} km, Elevation: {:.1f}°".format(
+                    self.target_name, distance, elevation
+                )
+                
+                if elevation >= self.min_elevation_angle and distance <= self.max_reception_distance:
+                    status_color = (0, 255, 0)  # Green - receivable
                 else:
-                    sat_text = "{}: {} MHz ({}) - NOT FOUND".format(sat_name, freq, mod)
-                    color = (100, 100, 100)  # Gray if not found
+                    status_color = (153, 153, 153)  # Gray - not receivable
                 
-                text = font_small.render(sat_text, True, color)
-                surface.blit(text, (10, y_offset))
-                y_offset += 18
-                
-                # Don't overflow the bottom bar
-                if y_offset > self.display_height - 10:
-                    break
+                # Position this above the pass list (2 passes instead of 4)
+                y_pos = self.display_height - 25 - (20 * min(len(self.pass_segments), 2)) - 5
+                text4 = font_small.render(status_text, True, status_color)
+                surface.blit(text4, (10, y_pos))
+        else:
+            # No satellite selected - show overview info
+            title_text = "SATELLITE TRACKER - Click satellite to select"
+            text = font_medium.render(title_text, True, (153, 153, 255))
+            surface.blit(text, (10, 10))
+            
+            target_text = "Target: {} ({:.4f}°N, {:.4f}°W)".format(
+                self.target_name, self.target_lat, abs(self.target_lon)
+            )
+            text2 = font_small.render(target_text, True, (0, 255, 0))
+            surface.blit(text2, (10, 35))
     
     def _draw_no_data_message(self, surface):
-        """Draw message when tracking not initialized"""
-        font = pygame.font.Font("assets/swiss911.ttf", 24)
-        text = font.render("SATELLITE TRACKING", True, (255, 153, 0))
+        """Draw message when satellite data unavailable"""
+        font = pygame.font.Font("assets/swiss911.ttf", 24)  # Increased from 20
+        text = font.render("SATELLITE DATA UNAVAILABLE", True, (255, 100, 100))
         text_rect = text.get_rect(center=(self.display_width // 2, self.display_height // 2 - 40))
         surface.blit(text, text_rect)
         
-        font_small = pygame.font.Font("assets/swiss911.ttf", 16)
-        text2 = font_small.render("Initializing orbital data...", True, (153, 153, 255))
+        font_small = pygame.font.Font("assets/swiss911.ttf", 18)  # Increased from 16
+        text2 = font_small.render("Check network connection and TLE data", True, (153, 153, 255))
         text2_rect = text2.get_rect(center=(self.display_width // 2, self.display_height // 2))
         surface.blit(text2, text2_rect)
     
@@ -730,52 +866,41 @@ class LcarsSatelliteTracker(LcarsWidget):
         if not self.visible:
             return
         
-        # Lazy initialization on first display
+        # Lazy initialization
         if not self.initialized:
             self.initialize_tracking()
         
         # Clear surface
         self.image.fill((0, 0, 0))
         
-        # Check if initialized successfully
         if not self.initialized:
             self._draw_no_data_message(self.image)
             screen.blit(self.image, self.rect)
             self.dirty = 0
             return
         
-        # Update satellite positions periodically (every 100ms)
+        # Update satellite positions periodically
         current_time = pygame.time.get_ticks()
         if current_time - self.last_update_time > 100:
             self.update_satellite_positions()
             self.last_update_time = current_time
         
-        # Draw components in order (back to front)
+        # Draw components
         self._draw_earth_map(self.image)
+        self._draw_target_crosshair(self.image)  # Always draw target
         
-        # If satellite selected, draw its tracks and other satellites
         if self.selected_satellite:
-            # Draw selected satellite's full tracks
-            self._draw_future_track(self.image)  # Draw future track first (behind past)
-            self._draw_ground_track(self.image)  # Draw past track
-            
-            # Draw other satellites (dimmer, no trails)
+            self._draw_future_track(self.image)
+            self._draw_ground_track(self.image)
             self._draw_other_satellites(self.image)
-            
-            # Draw selected satellite on top
             self._draw_satellite_position(self.image)
         else:
-            # No selection - draw mini trails for all satellites
             self._draw_mini_trails(self.image)
-            
-            # Draw all satellites
             self._draw_all_satellites(self.image)
         
-        self._draw_info_overlay(self.image)  # Draw text overlays last
+        self._draw_info_overlay(self.image)
         
-        # Blit to screen
         screen.blit(self.image, self.rect)
-        
         self.dirty = 0
     
     def handleEvent(self, event, clock):
@@ -783,29 +908,21 @@ class LcarsSatelliteTracker(LcarsWidget):
         if not self.visible:
             return False
         
-        # Handle mouse clicks
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if self.rect.collidepoint(event.pos):
-                # Convert to widget-relative coordinates
                 x_rel = event.pos[0] - self.rect.left
                 y_rel = event.pos[1] - self.rect.top
                 
-                # Only process clicks in map area
                 if y_rel < self.map_offset_y or y_rel > self.map_offset_y + self.map_height:
                     return False
                 
-                # Convert to lat/lon
-                lat, lon = self._screen_to_latlon(x_rel, y_rel)
-                
                 # Check if click is near any satellite
-                click_threshold = 20  # pixels
+                click_threshold = 20
                 closest_sat = None
                 closest_dist = float('inf')
                 
                 for sat_name, info in self.satellite_info.items():
                     sat_screen_pos = self._latlon_to_screen(info['lat'], info['lon'])
-                    
-                    # Calculate distance from click to satellite
                     dx = x_rel - sat_screen_pos[0]
                     dy = y_rel - sat_screen_pos[1]
                     dist = np.sqrt(dx*dx + dy*dy)
@@ -815,15 +932,11 @@ class LcarsSatelliteTracker(LcarsWidget):
                         closest_dist = dist
                 
                 if closest_sat:
-                    # Toggle selection
                     if self.selected_satellite == closest_sat:
-                        # Deselect
                         self.selected_satellite = None
                         print("Deselected satellite")
                     else:
-                        # Select new satellite
                         self.selected_satellite = closest_sat
-                        # Find frequency and modulation
                         freq = None
                         mod = None
                         for sat_name, f, m in self.satellite_list:
@@ -831,13 +944,10 @@ class LcarsSatelliteTracker(LcarsWidget):
                                 freq = f
                                 mod = m
                                 break
-                        
                         print("Selected satellite: {} ({} MHz {})".format(
                             closest_sat, freq, mod))
-                    
                     return True
                 else:
-                    # Click not near any satellite - deselect if one was selected
                     if self.selected_satellite:
                         self.selected_satellite = None
                         print("Deselected satellite")
