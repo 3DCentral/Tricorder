@@ -11,6 +11,7 @@ from ui.widgets.text_display import LcarsTextDisplay
 from ui.widgets.topo_map import LcarsTopoMap
 from ui.widgets.geological_map import LcarsGeologicalMap
 from ui.widgets.screen import LcarsScreen
+from ui.widgets.process_manager import get_process_manager
 import numpy as np
 from time import sleep
 import subprocess
@@ -21,6 +22,9 @@ import glob
 
 class ScreenMain(LcarsScreen):
     def setup(self, all_sprites):
+        # Process manager for tracking and cleaning up SDR processes
+        self.process_manager = get_process_manager()
+        
         all_sprites.add(LcarsBackgroundImage("assets/lcars_screen_i5.png"), layer=0)
         all_sprites.add(LcarsBlockMedium(colours.RED_BROWN, (186, 5), "SCAN", self.scanHandler), layer=1)
         all_sprites.add(LcarsBlockSmall(colours.ORANGE, (357, 5), "RECORD", self.recordHandler), layer=1)
@@ -201,7 +205,8 @@ class ScreenMain(LcarsScreen):
                     print("Scan process completed with code: {}".format(poll_result))
                     self.emf.scanning = False
                     self.emf_gadget.emf_scanning = False
-                    self.frequency_selector.clear_scanning_range()
+                    # FIX #2: Keep scanning range visible after completion!
+                    # (removed self.frequency_selector.clear_scanning_range())
                     try:
                         loaded_image = pygame.image.load("/tmp/spectrum.png")
                         scaled_image = pygame.transform.scale(loaded_image, self.scan_display_size)
@@ -292,6 +297,28 @@ class ScreenMain(LcarsScreen):
         """Stop FM demodulation if active"""
         self.demodulator.stop_demodulation()
     
+    def _kill_all_sdr_processes(self):
+        """Nuclear option: Kill ALL SDR processes by name, even if not tracked"""
+        print("ProcessManager: Performing aggressive SDR process cleanup...")
+        
+        # First, use ProcessManager to kill tracked processes
+        self.process_manager.kill_all()
+        
+        # Then, use killall as backup for any rogue processes
+        sdr_commands = ['rtl_fm', 'rtl_scan_2.py', 'rtl_scan_live.py', 'rtl_power', 'rtl_sdr']
+        
+        for cmd in sdr_commands:
+            try:
+                subprocess.run(['killall', '-9', cmd], 
+                             stderr=subprocess.DEVNULL, 
+                             stdout=subprocess.DEVNULL,
+                             timeout=1)
+                print("  Killed any rogue '{}' processes".format(cmd))
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                pass  # No processes found or already dead
+        
+        print("ProcessManager: Aggressive cleanup complete")
+    
     def _adjust_waterfall_filter_width(self, direction):
         """Adjust waterfall filter width (for fine-tuning frequency selection)
         
@@ -319,6 +346,9 @@ class ScreenMain(LcarsScreen):
     
     def _hide_all_gadgets(self):
         """Hide all gadget displays (text display stays visible)"""
+        # Kill all SDR processes when switching modes (aggressive cleanup)
+        self._kill_all_sdr_processes()
+        
         self.emf_gadget.visible = False
         self.microscope_gadget.visible = False
         self.spectral_gadget.visible = False
@@ -380,11 +410,61 @@ class ScreenMain(LcarsScreen):
             if self.spectrum_scan_display.visible and self.spectrum_scan_display.rect.collidepoint(event.pos):
                 if self.spectrum_scan_display.selected_frequency:
                     self._updateDemodulationInfo(self.spectrum_scan_display.selected_frequency)
+                    
+                    # FIX #1 PART B: Calculate and display scan range for new target
+                    target_freq = self.spectrum_scan_display.selected_frequency
+                    bandwidth = 10e6  # 10 MHz bandwidth
+                    
+                    start_freq = int(target_freq - bandwidth / 2)
+                    end_freq = int(target_freq + bandwidth / 2)
+                    
+                    # Clamp to valid SDR range
+                    start_freq = max(int(50e6), start_freq)
+                    end_freq = min(int(2.2e9), end_freq)
+                    
+                    # Update frequency selector with new range
+                    if self.frequency_selector.visible:
+                        self.frequency_selector.set_selected_frequency(target_freq)
+                        self.frequency_selector.set_scanning_range(start_freq, end_freq)
+                    
+                    # Store for later use
+                    self.current_scan_start_freq = start_freq
+                    self.current_scan_end_freq = end_freq
+                    
+                    print("Selected {:.3f} MHz - Will scan {:.3f} to {:.3f} MHz".format(
+                        target_freq / 1e6,
+                        start_freq / 1e6,
+                        end_freq / 1e6
+                    ))
             
             # Check if click is on frequency selector
             if self.frequency_selector.visible and self.frequency_selector.rect.collidepoint(event.pos):
                 if hasattr(self.frequency_selector, 'selected_frequency') and self.frequency_selector.selected_frequency:
                     self._updateDemodulationInfo(self.frequency_selector.selected_frequency)
+                    
+                    # FIX #1: PREDICTIVE SCAN WIDTH - Show what WILL be scanned
+                    target_freq = self.frequency_selector.selected_frequency
+                    bandwidth = 10e6  # 10 MHz scan width (same as in scanHandler)
+                    
+                    start_freq = int(target_freq - bandwidth / 2)
+                    end_freq = int(target_freq + bandwidth / 2)
+                    
+                    # Clamp to SDR range
+                    start_freq = max(int(50e6), start_freq)
+                    end_freq = min(int(2.2e9), end_freq)
+                    
+                    # Show the predicted scan range
+                    self.frequency_selector.set_scanning_range(start_freq, end_freq)
+                    
+                    # Store for later use
+                    self.current_scan_start_freq = start_freq
+                    self.current_scan_end_freq = end_freq
+                    
+                    print("Selected {:.3f} MHz - Will scan {:.3f} to {:.3f} MHz".format(
+                        target_freq / 1e6,
+                        start_freq / 1e6,
+                        end_freq / 1e6
+                    ))
             
             # Check if click is on microscope file list
             if self.microscope_file_list.visible and self.microscope_file_list.rect.collidepoint(event.pos):
@@ -583,22 +663,21 @@ class ScreenMain(LcarsScreen):
             
         # EMF mode: Show frequency selector and handle scanning
         if self.emf_gadget.visible or self.frequency_selector.visible or self.spectrum_scan_display.visible:
-            if self.spectrum_scan_display.visible and self.spectrum_scan_display.scan_complete:
-                if self.spectrum_scan_display.selected_frequency:
-                    self.frequency_selector.set_selected_frequency(self.spectrum_scan_display.selected_frequency)
-                
-                self.spectrum_scan_display.set_scan_complete(False)
-                self.spectrum_scan_display.clear_selection()
-                self.emf_gadget.visible = False
-                self.frequency_selector.visible = True
-                self.spectrum_scan_display.visible = True
-                print("Select a new target frequency")
-                return
+            # REMOVED: The "deactivate scan" block that required an extra SCAN press
+            # Now users can select a new frequency and scan immediately!
             
             if self.emf_gadget.visible:
                 self.emf_gadget.visible = False
                 self.frequency_selector.visible = True
                 self.spectrum_scan_display.visible = False
+                
+                # FIX #4: If we have a previous scan range, show it
+                if self.current_scan_start_freq and self.current_scan_end_freq:
+                    self.frequency_selector.set_scanning_range(
+                        self.current_scan_start_freq,
+                        self.current_scan_end_freq
+                    )
+                
                 print("Select a target frequency on the scale above")
                 return
             
@@ -643,7 +722,8 @@ class ScreenMain(LcarsScreen):
                 
                 self.spectrum_scan_display.set_frequency_range(start_freq, end_freq)
                 
-                self.emf.scan_process = subprocess.Popen(
+                self.emf.scan_process = self.process_manager.start_process(
+                    'spectrum_scanner',
                     ['python3', '/home/tricorder/rpi_lcars-master/rtl_scan_2.py', 
                      str(start_freq), str(end_freq)],
                     stdout=subprocess.PIPE,
@@ -985,5 +1065,8 @@ class ScreenMain(LcarsScreen):
         self.emf_gadget.emf_scanning = False
         
     def logoutHandler(self, item, event, clock):
+        # Kill all SDR processes before logout (aggressive cleanup)
+        self._kill_all_sdr_processes()
+        
         from screens.authorize import ScreenAuthorize
         self.loadScreen(ScreenAuthorize())
