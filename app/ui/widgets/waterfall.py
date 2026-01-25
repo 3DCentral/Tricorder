@@ -125,7 +125,7 @@ class LcarsWaterfall(LcarsWidget):
         
         # Start subprocess
         self.scan_process = subprocess.Popen(
-            ['python', '/home/tricorder/rpi_lcars-master/rtl_scan_live.py', 
+            ['python3', '/home/tricorder/rpi_lcars-master/rtl_scan_live.py', 
              str(int(center_freq)), str(int(sample_rate))],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
