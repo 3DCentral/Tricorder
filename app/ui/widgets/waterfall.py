@@ -9,7 +9,7 @@ CHANGES FROM ORIGINAL:
 import pygame
 import numpy as np
 from ui.widgets.sprite import LcarsWidget
-
+from ui.widgets.process_manager import get_process_manager
 
 class LcarsWaterfall(LcarsWidget):
     """
@@ -33,6 +33,7 @@ class LcarsWaterfall(LcarsWidget):
         self.image.fill((0, 0, 0))  # Black background
         
         LcarsWidget.__init__(self, None, pos, size)
+        self.process_manager = get_process_manager()
         
         # Waterfall data
         self.waterfall_data = None
@@ -89,12 +90,13 @@ class LcarsWaterfall(LcarsWidget):
         self.data_hash = None  # Track if data has changed
     
     def stop_scan(self):
-        """Stop live waterfall scan"""
-        if self.scan_active and self.scan_process:
-            self.scan_process.terminate()
-            self.scan_process.wait()
+        """Stop the waterfall scan"""
+        if self.scan_active:
+            self.process_manager.kill_process('waterfall_live')
             self.scan_process = None
+            
         self.scan_active = False
+
     
     def start_scan(self, center_freq, sample_rate=None):
         """Start live waterfall scan at given frequency
@@ -124,7 +126,8 @@ class LcarsWaterfall(LcarsWidget):
         self.data_hash = None
         
         # Start subprocess
-        self.scan_process = subprocess.Popen(
+        self.scan_process = self.process_manager.start_process(
+            'waterfall_live',
             ['python3', '/home/tricorder/rpi_lcars-master/rtl_scan_live.py', 
              str(int(center_freq)), str(int(sample_rate))],
             stdout=subprocess.PIPE,

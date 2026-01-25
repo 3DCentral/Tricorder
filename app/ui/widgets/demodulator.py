@@ -9,7 +9,7 @@ import subprocess
 import os
 import signal
 from ui.widgets.sprite import LcarsWidget
-
+from ui.widgets.process_manager import get_process_manager
 
 class LcarsDemodulator(LcarsWidget):
     """
@@ -31,6 +31,7 @@ class LcarsDemodulator(LcarsWidget):
         # Non-visual widget - pass black color and 1x1 size (minimal surface)
         # Color must be valid for pygame.Surface.fill() even though we don't display it
         LcarsWidget.__init__(self, (0, 0, 0), (0, 0), (1, 1))
+        self.process_manager = get_process_manager()
         
         # Demodulation state
         self.fm_process = None
@@ -342,9 +343,9 @@ class LcarsDemodulator(LcarsWidget):
         
         try:
             # Start demodulation process
-            self.fm_process = subprocess.Popen(
-                ['bash', '-c', cmd], 
-                preexec_fn=os.setsid,
+            self.fm_process = self.process_manager.start_process(
+                'demodulator',
+                ['bash', '-c', cmd],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT
             )
@@ -360,15 +361,9 @@ class LcarsDemodulator(LcarsWidget):
             self.fm_process = None
     
     def stop_demodulation(self):
-        """Stop FM/AM demodulation"""
-        if self.tuned_in and self.fm_process:
-            try:
-                # Kill the process group (kills rtl_fm and play)
-                os.killpg(os.getpgid(self.fm_process.pid), signal.SIGTERM)
-                print("Demodulation stopped")
-            except (OSError, ProcessLookupError, AttributeError) as e:
-                print("Demodulation already stopped or could not be stopped: {}".format(e))
-            
+        """Stop FM demodulation"""
+        if self.tuned_in:
+            self.process_manager.kill_process('demodulator')
             self.fm_process = None
         
         self.tuned_in = False
