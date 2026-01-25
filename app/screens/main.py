@@ -224,7 +224,10 @@ class ScreenMain(LcarsScreen):
                         progress_files = glob.glob("/tmp/spectrum_progress_*.png")
                         
                         if progress_files:
-                            latest_file = max(progress_files, key=os.path.getmtime)
+                            # FIX: Sort by filename (numerically) to get the latest progress file
+                            # spectrum_progress_0001.png, spectrum_progress_0002.png, etc.
+                            sorted_files = sorted(progress_files)
+                            latest_file = sorted_files[-1]  # Get the last (highest numbered) file
                             
                             if not hasattr(self.emf, 'last_spectrum_file') or latest_file != self.emf.last_spectrum_file:
                                 loaded_image = pygame.image.load(latest_file)
@@ -234,6 +237,7 @@ class ScreenMain(LcarsScreen):
                                 self.emf.last_spectrum_file = latest_file
                                 print("Loaded spectrum update: {}".format(latest_file))
                         else:
+                            # Fallback to final spectrum if progress files don't exist
                             if os.path.exists("/tmp/spectrum.png"):
                                 self.emf.spectrum_image = pygame.image.load("/tmp/spectrum.png")
                                 
@@ -608,7 +612,7 @@ class ScreenMain(LcarsScreen):
                 if target_freq is None:
                     print("Please select a target frequency first")
                     return
-                bandwidth = 20e6
+                bandwidth = 10e6
                 
                 start_freq = int(target_freq - bandwidth / 2)
                 end_freq = int(target_freq + bandwidth / 2)
@@ -640,7 +644,7 @@ class ScreenMain(LcarsScreen):
                 self.spectrum_scan_display.set_frequency_range(start_freq, end_freq)
                 
                 self.emf.scan_process = subprocess.Popen(
-                    ['python', '/home/tricorder/rpi_lcars-master/rtl_scan_2.py', 
+                    ['python3', '/home/tricorder/rpi_lcars-master/rtl_scan_2.py', 
                      str(start_freq), str(end_freq)],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE
@@ -854,7 +858,6 @@ class ScreenMain(LcarsScreen):
             current_widget = self.geospatial_modes[self.current_geospatial_mode]['widget']
             if current_widget and hasattr(current_widget, 'pan'):
                 current_widget.pan(-self.topo_pan_speed, 0)
-            return
             return
         
         # Waterfall: increase frequency
