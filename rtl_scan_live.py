@@ -80,7 +80,11 @@ METADATA_FILE_TEMP = OUTPUT_DIR + "spectrum_live_metadata_temp.npy"
 
 def remove_dc_spike(psd, center_idx, window_size=50):
     """
-    Remove DC spike using interpolation (same method as rtl_scan_2.py)
+    Remove DC spike using smooth polynomial fitting
+    
+    This creates a much smoother transition than linear interpolation
+    by fitting a polynomial curve to the surrounding data and blending
+    it into the spike region.
     
     Args:
         psd: Power spectral density array
@@ -88,36 +92,88 @@ def remove_dc_spike(psd, center_idx, window_size=50):
         window_size: Width of spike to remove (bins)
     
     Returns:
-        psd_fixed: PSD with DC spike removed
+        psd_fixed: PSD with DC spike smoothly removed
     """
     # Find spike region
     start_idx = max(0, center_idx - window_size // 2)
     end_idx = min(len(psd), center_idx + window_size // 2)
     
-    # Need points on both sides for interpolation
-    if start_idx < 5 or end_idx > len(psd) - 5:
+    # Need points on both sides for fitting
+    if start_idx < 10 or end_idx > len(psd) - 10:
         return psd
     
-    # Get points before and after spike
-    before_idx = np.arange(max(0, start_idx - 20), start_idx)
-    after_idx = np.arange(end_idx, min(len(psd), end_idx + 20))
+    # Use wider region for polynomial fit (smoother result)
+    fit_margin = 40  # Use 40 bins on each side for fitting
     
-    if len(before_idx) == 0 or len(after_idx) == 0:
+    # Get points before and after spike for fitting
+    before_start = max(0, start_idx - fit_margin)
+    before_end = start_idx
+    after_start = end_idx
+    after_end = min(len(psd), end_idx + fit_margin)
+    
+    # Combine regions for fitting
+    fit_x = np.concatenate([
+        np.arange(before_start, before_end),
+        np.arange(after_start, after_end)
+    ])
+    fit_y = psd[fit_x]
+    
+    if len(fit_x) < 10:
         return psd
     
-    # Interpolate across spike
-    interp_x = np.concatenate([before_idx, after_idx])
-    interp_y = psd[interp_x]
-    
-    # Create interpolation function
-    f = interp1d(interp_x, interp_y, kind='linear', fill_value='extrapolate')
-    
-    # Fill in spike region with interpolated values
-    psd_fixed = psd.copy()
-    spike_indices = np.arange(start_idx, end_idx)
-    psd_fixed[spike_indices] = f(spike_indices)
-    
-    return psd_fixed
+    # Fit 3rd degree polynomial (smooth curve, not just linear)
+    # This creates a natural-looking interpolation
+    try:
+        coeffs = np.polyfit(fit_x, fit_y, deg=3)
+        poly_func = np.poly1d(coeffs)
+        
+        # Generate smooth interpolated values for spike region
+        spike_indices = np.arange(start_idx, end_idx)
+        interpolated_values = poly_func(spike_indices)
+        
+        # Apply gradual blending at edges for ultra-smooth transition
+        blend_width = 10  # Blend over 10 bins at each edge
+        
+        psd_fixed = psd.copy()
+        
+        # Replace center with interpolated values
+        psd_fixed[start_idx:end_idx] = interpolated_values
+        
+        # Blend at left edge
+        if start_idx >= blend_width:
+            for i in range(blend_width):
+                blend_idx = start_idx - blend_width + i
+                alpha = i / blend_width  # 0 to 1
+                psd_fixed[blend_idx] = (1 - alpha) * psd[blend_idx] + alpha * poly_func(blend_idx)
+        
+        # Blend at right edge  
+        if end_idx + blend_width <= len(psd):
+            for i in range(blend_width):
+                blend_idx = end_idx + i
+                alpha = 1 - (i / blend_width)  # 1 to 0
+                psd_fixed[blend_idx] = alpha * poly_func(blend_idx) + (1 - alpha) * psd[blend_idx]
+        
+        return psd_fixed
+        
+    except np.linalg.LinAlgError:
+        # Fallback: if polynomial fit fails, use simple linear interpolation
+        # (This shouldn't happen but good to be safe)
+        before_idx = np.arange(max(0, start_idx - 20), start_idx)
+        after_idx = np.arange(end_idx, min(len(psd), end_idx + 20))
+        
+        if len(before_idx) == 0 or len(after_idx) == 0:
+            return psd
+        
+        interp_x = np.concatenate([before_idx, after_idx])
+        interp_y = psd[interp_x]
+        
+        f = interp1d(interp_x, interp_y, kind='linear', fill_value='extrapolate')
+        
+        psd_fixed = psd.copy()
+        spike_indices = np.arange(start_idx, end_idx)
+        psd_fixed[spike_indices] = f(spike_indices)
+        
+        return psd_fixed
 
 
 def parse_args():
@@ -275,7 +331,7 @@ def main():
     print("  Update rate: ~{:.1f} Hz".format(1/UPDATE_INTERVAL))
     print("  Waterfall history: {} lines (~{:.1f} seconds)".format(
         waterfall_lines, waterfall_lines*UPDATE_INTERVAL))
-    print("  DC spike removal: ENABLED (NEW)")
+    print("  DC spike removal: SMOOTH POLYNOMIAL (eliminates discontinuities)")
     print("\nWriting data to:")
     print("  PSD: {}".format(PSD_FILE))
     print("  Waterfall: {}".format(WATERFALL_FILE))
