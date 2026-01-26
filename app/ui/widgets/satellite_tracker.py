@@ -65,8 +65,13 @@ class LcarsSatelliteTracker(LcarsWidget):
         self.earth_map_path = earth_map_path
         
         # TLE cache configuration
-        self.tle_url = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=weather&FORMAT=tle'
-        self.cache_file = '/tmp/weather_satellites.tle'
+        # Need multiple groups: weather (NOAA/METEOR), stations (ISS), amateur (ham sats)
+        self.tle_urls = [
+            'https://celestrak.org/NORAD/elements/gp.php?GROUP=weather&FORMAT=tle',
+            'https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=tle',  # ISS
+            'https://celestrak.org/NORAD/elements/gp.php?GROUP=amateur&FORMAT=tle',   # Ham sats
+        ]
+        self.cache_file = '/tmp/all_satellites.tle'
         self.cache_expiry_hours = 6
         self.last_tle_update = None
         
@@ -85,6 +90,7 @@ class LcarsSatelliteTracker(LcarsWidget):
         # Selected satellite
         self.selected_satellite = None
         self.tracking_enabled = False  # NEW: Track calculation only enabled via SCAN button
+        self.last_tracking_state = False  # Track previous state to avoid immediate recalc
         
         # Pass prediction data
         self.next_pass_info = None  # Will store: time_until, duration, max_elevation
@@ -107,7 +113,8 @@ class LcarsSatelliteTracker(LcarsWidget):
         
         # Animation state
         self.pulse_phase = 0
-        self.last_update_time = 0
+        self.last_update_time = 0  # Position updates every 100ms
+        self.last_trail_update_time = 0  # Mini trail updates every 5 seconds
         
         # Load Earth map if provided
         if earth_map_path:
@@ -149,18 +156,27 @@ class LcarsSatelliteTracker(LcarsWidget):
             return False
     
     def _download_tle_data(self):
-        """Download fresh TLE data from CelesTrak"""
+        """Download fresh TLE data from CelesTrak (multiple groups)"""
         try:
             import requests
-            print("Downloading TLE data from {}".format(self.tle_url))
-            response = requests.get(self.tle_url, timeout=10)
-            response.raise_for_status()
+            print("Downloading TLE data from multiple groups...")
             
+            all_tle_data = []
+            
+            # Download each group
+            for url in self.tle_urls:
+                group_name = url.split('GROUP=')[1].split('&')[0]
+                print("  Fetching {} group...".format(group_name))
+                response = requests.get(url, timeout=10)
+                response.raise_for_status()
+                all_tle_data.append(response.text)
+            
+            # Combine all TLE data into one file
             with open(self.cache_file, 'w') as f:
-                f.write(response.text)
+                f.write('\n'.join(all_tle_data))
             
             self.last_tle_update = datetime.now()
-            print("TLE data downloaded and cached")
+            print("TLE data downloaded and cached ({} groups)".format(len(self.tle_urls)))
             return True
         except Exception as e:
             print("Failed to download TLE data: {}".format(e))
@@ -380,38 +396,67 @@ class LcarsSatelliteTracker(LcarsWidget):
                 }
             
             # Update mini trails for all satellites (when no tracking active)
+            # Update trails less frequently (every 5 seconds) to avoid lag
             if not self.tracking_enabled:
-                self.mini_trails = {}
-                for sat_name, satellite in self.satellites.items():
-                    past_points = []
-                    future_points = []
-                    
-                    # Past trail
-                    for minutes_ago in range(self.mini_trail_minutes_past, 0, -2):
-                        t_past = self.ts.ut1_jd(t.ut1 - minutes_ago / (24 * 60))
-                        geocentric_past = satellite.at(t_past)
-                        sub_past = wgs84.subpoint(geocentric_past)
-                        screen_pos = self._latlon_to_screen(
-                            sub_past.latitude.degrees,
-                            sub_past.longitude.degrees
+                current_time_ms = pygame.time.get_ticks()
+                time_since_trail_update = current_time_ms - self.last_trail_update_time
+                
+                # Recalculate trails only every 5 seconds, or if we don't have any yet
+                should_update_trails = (
+                    len(self.mini_trails) == 0 or 
+                    time_since_trail_update > 5000
+                )
+                
+                if should_update_trails:
+                    self.mini_trails = {}
+                    for sat_name, satellite in self.satellites.items():
+                        past_points = []
+                        future_points = []
+                        
+                        # Past trail
+                        for minutes_ago in range(self.mini_trail_minutes_past, 0, -2):
+                            t_past = self.ts.ut1_jd(t.ut1 - minutes_ago / (24 * 60))
+                            geocentric_past = satellite.at(t_past)
+                            sub_past = wgs84.subpoint(geocentric_past)
+                            screen_pos = self._latlon_to_screen(
+                                sub_past.latitude.degrees,
+                                sub_past.longitude.degrees
+                            )
+                            past_points.append(screen_pos)
+                        
+                        # Add current position to connect past and future trails
+                        current_pos = self._latlon_to_screen(
+                            self.satellite_info[sat_name]['lat'],
+                            self.satellite_info[sat_name]['lon']
                         )
-                        past_points.append(screen_pos)
+                        past_points.append(current_pos)  # End of past trail
+                        future_points.insert(0, current_pos)  # Start of future trail
+                        
+                        # Future trail
+                        for minutes_ahead in range(2, self.mini_trail_minutes_future, 2):
+                            t_future = self.ts.ut1_jd(t.ut1 + minutes_ahead / (24 * 60))
+                            geocentric_future = satellite.at(t_future)
+                            sub_future = wgs84.subpoint(geocentric_future)
+                            screen_pos = self._latlon_to_screen(
+                                sub_future.latitude.degrees,
+                                sub_future.longitude.degrees
+                            )
+                            future_points.append(screen_pos)
+                        
+                        self.mini_trails[sat_name] = {
+                            'past': past_points,
+                            'future': future_points
+                        }
                     
-                    # Future trail
-                    for minutes_ahead in range(2, self.mini_trail_minutes_future, 2):
-                        t_future = self.ts.ut1_jd(t.ut1 + minutes_ahead / (24 * 60))
-                        geocentric_future = satellite.at(t_future)
-                        sub_future = wgs84.subpoint(geocentric_future)
-                        screen_pos = self._latlon_to_screen(
-                            sub_future.latitude.degrees,
-                            sub_future.longitude.degrees
-                        )
-                        future_points.append(screen_pos)
-                    
-                    self.mini_trails[sat_name] = {
-                        'past': past_points,
-                        'future': future_points
-                    }
+                    self.last_trail_update_time = current_time_ms
+            else:
+                # When tracking is enabled, clear mini trails to save memory
+                # They'll be recalculated when tracking is disabled
+                if len(self.mini_trails) > 0:
+                    self.mini_trails = {}
+            
+            # Store current tracking state
+            self.last_tracking_state = self.tracking_enabled
             
             # Update detailed track ONLY when tracking is enabled (via SCAN button)
             if self.tracking_enabled and self.selected_satellite and self.selected_satellite in self.satellites:

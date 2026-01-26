@@ -94,6 +94,7 @@ class LcarsGeologicalMap(LcarsWidget):
         self.gdf = None
         self.sindex = None
         self.geojson_file = geojson_file
+        self.full_data_loaded = False  # Track if we've loaded the complete dataset
         
         # Geographic bounds (matches topographical map for same area)
         # Default: Virginia area from USGS_13_n38w078_20211220.tif
@@ -137,45 +138,68 @@ class LcarsGeologicalMap(LcarsWidget):
         if geojson_file:
             self.load_geojson(geojson_file)
     
-    def load_geojson(self, file_path):
+    def load_geojson(self, file_path, center_lat=None, center_lon=None, initial_load=True):
         """
-        Load geological data from GeoJSON file
+        Load geological data from GeoJSON file with spatial filtering
         
         Args:
             file_path: Path to GeoJSON file
+            center_lat: Center latitude for initial viewport (optional)
+            center_lon: Center longitude for initial viewport (optional)
+            initial_load: If True, only load a small area around center (fast)
             
         Returns:
             bool: True if loaded successfully, False otherwise
         """
         try:
-            print("Loading GeoJSON geological data: {}".format(file_path))
+            if initial_load and center_lat is not None and center_lon is not None:
+                # FAST PATH: Load only a small area around the center point
+                # Calculate viewport bounds based on starting zoom (1.0x)
+                # At 1.0x zoom, we see roughly 0.1 degree radius
+                viewport_radius = 0.15  # degrees (slightly larger for buffer)
+                
+                bbox = (
+                    center_lon - viewport_radius,  # minx
+                    center_lat - viewport_radius,  # miny
+                    center_lon + viewport_radius,  # maxx
+                    center_lat + viewport_radius   # maxy
+                )
+                
+                print("Loading GeoJSON with spatial filter (fast load)...")
+                print("  Viewport: {:.3f} to {:.3f} lon, {:.3f} to {:.3f} lat".format(
+                    bbox[0], bbox[2], bbox[1], bbox[3]))
+                
+                # Load only features within bounding box
+                self.gdf = gpd.read_file(file_path, bbox=bbox)
+                
+                print("Loaded {} geological units (filtered)".format(len(self.gdf)))
+                
+                # Store file path for later expansion
+                self.geojson_file = file_path
+                self.full_data_loaded = False
+                
+            else:
+                # SLOW PATH: Load entire file (only when user zooms way out or pans far)
+                print("Loading complete GeoJSON geological data: {}".format(file_path))
+                self.gdf = gpd.read_file(file_path)
+                print("Successfully loaded {} geological units (complete dataset)".format(len(self.gdf)))
+                
+                self.geojson_file = file_path
+                self.full_data_loaded = True
             
-            # Load GeoJSON
-            self.gdf = gpd.read_file(file_path)
+            # Build spatial index for fast queries (quick even for filtered data)
+            if len(self.gdf) > 0:
+                self.sindex = self.gdf.sindex
             
-            # Build spatial index for fast queries
-            print("Building spatial index...")
-            self.sindex = self.gdf.sindex
+            # Get actual data bounds from the loaded subset
+            if len(self.gdf) > 0:
+                bounds = self.gdf.total_bounds  # [minx, miny, maxx, maxy]
+                data_lon_min, data_lat_min, data_lon_max, data_lat_max = bounds
+                
+                print("Loaded data bounds: {:.3f} to {:.3f} lon, {:.3f} to {:.3f} lat".format(
+                    data_lon_min, data_lon_max, data_lat_min, data_lat_max))
             
-            self.geojson_file = file_path
-            
-            print("Successfully loaded {} geological units".format(len(self.gdf)))
-            
-            # Get actual data bounds from the GeoJSON
-            bounds = self.gdf.total_bounds  # [minx, miny, maxx, maxy]
-            data_lon_min, data_lat_min, data_lon_max, data_lat_max = bounds
-            
-            print("Geological data bounds: {:.3f} to {:.3f} lon, {:.3f} to {:.3f} lat".format(
-                data_lon_min, data_lon_max, data_lat_min, data_lat_max))
-            
-            # Use the actual data bounds (should match USGS topo map: 37-38N, 77-78W)
-            #self.lat_min = data_lat_min
-            #self.lat_max = data_lat_max
-            #self.lon_min = data_lon_min
-            #self.lon_max = data_lon_max
-            
-            # Build age cache for color mapping
-            print("Building age-based color cache...")
+            # Build age cache for color mapping (only for loaded features - fast!)
             self.unit_age_cache = {}
             for _, row in self.gdf.iterrows():
                 unit_name = row.get('MapUnit', 'Unknown')
@@ -204,15 +228,16 @@ class LcarsGeologicalMap(LcarsWidget):
             print("Virtual pixel space: {}x{} (aspect ratio: {:.3f})".format(
                 self.virtual_width, self.virtual_height, aspect_ratio))
             
-            # Initialize view to center on Powhatan, VA (37.5277°N, 77.4710°W)
+            # Initialize view to center on target location (37.52921°N, 77.45316°W)
             # This MUST use the same method as topographical map
-            pixel_coords = self._latlon_to_pixel(37.5277, -77.4710)
-            if pixel_coords:
-                pixel_x, pixel_y = pixel_coords
-                # Camera position is negative of the center point
-                self.cam_x = -pixel_x
-                self.cam_y = -pixel_y
-                print("Centered view on Powhatan, VA")
+            if center_lat is not None and center_lon is not None:
+                pixel_coords = self._latlon_to_pixel(center_lat, center_lon)
+                if pixel_coords:
+                    pixel_x, pixel_y = pixel_coords
+                    # Camera position is negative of the center point
+                    self.cam_x = -pixel_x
+                    self.cam_y = -pixel_y
+                    print("Centered view on target coordinates")
             
             return True
             
@@ -221,6 +246,121 @@ class LcarsGeologicalMap(LcarsWidget):
             import traceback
             traceback.print_exc()
             return False
+    
+    def _check_and_expand_data(self):
+        """
+        Check if we need to load more geological data based on current view
+        
+        Called during rendering to dynamically expand the loaded dataset
+        when user zooms out or pans to new areas.
+        """
+        # If full data already loaded, nothing to do
+        if self.full_data_loaded or self.geojson_file is None:
+            return
+        
+        # Calculate current viewport bounds in lat/lon
+        viewport_bounds = self._get_viewport_bounds()
+        if viewport_bounds is None:
+            return
+        
+        min_lon, min_lat, max_lon, max_lat = viewport_bounds
+        
+        # Check if viewport extends beyond currently loaded data
+        if len(self.gdf) > 0:
+            loaded_bounds = self.gdf.total_bounds  # [minx, miny, maxx, maxy]
+            loaded_min_lon, loaded_min_lat, loaded_max_lon, loaded_max_lat = loaded_bounds
+            
+            # Add 10% margin for smooth expansion
+            margin = 0.05  # degrees
+            
+            # Check if we're near the edge of loaded data
+            near_edge = (
+                min_lon < loaded_min_lon + margin or
+                max_lon > loaded_max_lon - margin or
+                min_lat < loaded_min_lat + margin or
+                max_lat > loaded_max_lat - margin
+            )
+            
+            if near_edge:
+                # Expand the loaded area
+                print("Expanding geological data - approaching edge of loaded area...")
+                
+                # Calculate expanded bounding box (2x current viewport)
+                center_lon = (min_lon + max_lon) / 2
+                center_lat = (min_lat + max_lat) / 2
+                half_width = (max_lon - min_lon) * 1.5
+                half_height = (max_lat - min_lat) * 1.5
+                
+                bbox = (
+                    center_lon - half_width,
+                    center_lat - half_height,
+                    center_lon + half_width,
+                    center_lat + half_height
+                )
+                
+                # Reload with expanded bbox
+                try:
+                    new_gdf = gpd.read_file(self.geojson_file, bbox=bbox)
+                    
+                    if len(new_gdf) > len(self.gdf):
+                        print("  Expanded from {} to {} geological units".format(
+                            len(self.gdf), len(new_gdf)))
+                        
+                        self.gdf = new_gdf
+                        self.sindex = self.gdf.sindex
+                        
+                        # Update age cache with new units
+                        for _, row in new_gdf.iterrows():
+                            unit_name = row.get('MapUnit', 'Unknown')
+                            age_name = row.get('Age', 'Unknown')
+                            if unit_name and unit_name not in self.unit_age_cache:
+                                self.unit_age_cache[unit_name] = age_name
+                        
+                        # Invalidate cache to force redraw
+                        self.cached_surface = None
+                    
+                except Exception as e:
+                    print("Failed to expand geological data: {}".format(e))
+    
+    def _get_viewport_bounds(self):
+        """
+        Get the current viewport bounds in lat/lon coordinates
+        
+        Returns:
+            tuple: (min_lon, min_lat, max_lon, max_lat) or None if invalid
+        """
+        try:
+            # Calculate viewport corners in pixel space
+            screen_width = self.display_width / self.zoom
+            screen_height = self.display_height / self.zoom
+            
+            # Top-left corner
+            tl_pixel_x = -self.cam_x
+            tl_pixel_y = -self.cam_y
+            
+            # Bottom-right corner
+            br_pixel_x = tl_pixel_x + screen_width
+            br_pixel_y = tl_pixel_y + screen_height
+            
+            # Convert to lat/lon
+            tl_latlon = self._pixel_to_latlon(tl_pixel_x, tl_pixel_y)
+            br_latlon = self._pixel_to_latlon(br_pixel_x, br_pixel_y)
+            
+            if tl_latlon and br_latlon:
+                tl_lat, tl_lon = tl_latlon
+                br_lat, br_lon = br_latlon
+                
+                # Return as (min_lon, min_lat, max_lon, max_lat)
+                return (
+                    min(tl_lon, br_lon),
+                    min(tl_lat, br_lat),
+                    max(tl_lon, br_lon),
+                    max(tl_lat, br_lat)
+                )
+        except:
+            pass
+        
+        return None
     
     def _latlon_to_pixel(self, lat, lon):
         """
@@ -1164,6 +1304,10 @@ class LcarsGeologicalMap(LcarsWidget):
         """Update and render the geological map"""
         if not self.visible:
             return
+        
+        # Check if we need to expand loaded data (only when visible)
+        if self.gdf is not None and not self.full_data_loaded:
+            self._check_and_expand_data()
         
         # Clear surface with black background (LCARS style)
         self.image.fill((0, 0, 0))
