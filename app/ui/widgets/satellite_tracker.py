@@ -84,13 +84,14 @@ class LcarsSatelliteTracker(LcarsWidget):
         
         # Selected satellite
         self.selected_satellite = None
+        self.tracking_enabled = False  # NEW: Track calculation only enabled via SCAN button
         
         # Pass prediction data
         self.next_pass_info = None  # Will store: time_until, duration, max_elevation
         
         # Trail data
-        self.mini_trail_minutes_past = 20
-        self.mini_trail_minutes_future = 20
+        self.mini_trail_minutes_past = 5  # REDUCED: Shorter trail (was 20)
+        self.mini_trail_minutes_future = 20  # RESTORED: Keep future trail longer
         self.mini_trails = {}
         
         # Display state for selected satellite
@@ -101,7 +102,7 @@ class LcarsSatelliteTracker(LcarsWidget):
         self.ground_track_points = []
         self.future_track_points = []
         self.pass_segments = []  # Info about each receivable pass
-        self.track_minutes_past = 90
+        self.track_minutes_past = 10  # REDUCED: Shorter trail (was 90)
         self.track_minutes_future = 180
         
         # Animation state
@@ -114,6 +115,21 @@ class LcarsSatelliteTracker(LcarsWidget):
         
         # Initialize satellite tracking (lazy load)
         self.initialized = False
+    
+    def enable_tracking(self):
+        """Enable detailed track calculation for selected satellite (called when SCAN pressed)"""
+        if self.selected_satellite:
+            self.tracking_enabled = True
+            print("Tracking enabled for {}".format(self.selected_satellite))
+            return True
+        else:
+            print("No satellite selected - select one first by tapping it")
+            return False
+    
+    def disable_tracking(self):
+        """Disable detailed tracking (returns to overview mode with all satellites)"""
+        self.tracking_enabled = False
+        print("Tracking disabled - showing all satellites")
     
     def load_earth_map(self, image_path):
         """Load Earth map background image"""
@@ -363,8 +379,8 @@ class LcarsSatelliteTracker(LcarsWidget):
                     'velocity_kms': geocentric.velocity.km_per_s
                 }
             
-            # Update mini trails for all satellites (overview mode)
-            if not self.selected_satellite:
+            # Update mini trails for all satellites (when no tracking active)
+            if not self.tracking_enabled:
                 self.mini_trails = {}
                 for sat_name, satellite in self.satellites.items():
                     past_points = []
@@ -397,8 +413,8 @@ class LcarsSatelliteTracker(LcarsWidget):
                         'future': future_points
                     }
             
-            # Update detailed track for selected satellite
-            if self.selected_satellite and self.selected_satellite in self.satellites:
+            # Update detailed track ONLY when tracking is enabled (via SCAN button)
+            if self.tracking_enabled and self.selected_satellite and self.selected_satellite in self.satellites:
                 satellite = self.satellites[self.selected_satellite]
                 geocentric = satellite.at(t)
                 subpoint = wgs84.subpoint(geocentric)
@@ -463,8 +479,10 @@ class LcarsSatelliteTracker(LcarsWidget):
                             # Start of a new pass
                             current_pass = {
                                 'start_minute': minutes_ahead,
+                                'start_lon': sub.longitude.degrees,  # NEW: Track start longitude
                                 'max_elevation': elevation,
                                 'max_elevation_minute': minutes_ahead,
+                                'max_elevation_lon': sub.longitude.degrees,  # NEW: Track peak longitude
                                 'end_minute': minutes_ahead
                             }
                         else:
@@ -473,10 +491,32 @@ class LcarsSatelliteTracker(LcarsWidget):
                             if elevation > current_pass['max_elevation']:
                                 current_pass['max_elevation'] = elevation
                                 current_pass['max_elevation_minute'] = minutes_ahead
+                                current_pass['max_elevation_lon'] = sub.longitude.degrees  # NEW: Update peak longitude
                     else:
                         if current_pass is not None:
                             # End of pass - save it
                             current_pass['duration'] = current_pass['end_minute'] - current_pass['start_minute']
+                            
+                            # NEW: Calculate direction (East or West)
+                            # Satellites move west-to-east or east-to-west based on longitude change
+                            lon_change = current_pass['max_elevation_lon'] - current_pass['start_lon']
+                            
+                            # Handle dateline crossing
+                            if lon_change > 180:
+                                lon_change -= 360
+                            elif lon_change < -180:
+                                lon_change += 360
+                            
+                            # Determine cardinal direction based on longitude change
+                            if abs(lon_change) < 5:
+                                # Nearly overhead, check if trending east or west
+                                direction = "N" if lon_change >= 0 else "S"
+                            else:
+                                # Clear east or west movement
+                                direction = "E" if lon_change > 0 else "W"
+                            
+                            current_pass['direction'] = direction
+                            
                             self.pass_segments.append(current_pass)
                             passes_found += 1
                             
@@ -489,6 +529,18 @@ class LcarsSatelliteTracker(LcarsWidget):
                 # Save final pass if we ended in the middle of one
                 if current_pass is not None and passes_found < max_passes:
                     current_pass['duration'] = current_pass['end_minute'] - current_pass['start_minute']
+                    
+                    # NEW: Calculate direction for final pass too
+                    lon_change = current_pass['max_elevation_lon'] - current_pass['start_lon']
+                    if lon_change > 180:
+                        lon_change -= 360
+                    elif lon_change < -180:
+                        lon_change += 360
+                    direction = "E" if lon_change > 0 else "W"
+                    if abs(lon_change) < 5:
+                        direction = "N" if lon_change >= 0 else "S"
+                    current_pass['direction'] = direction
+                    
                     self.pass_segments.append(current_pass)
                 
                 # Predict next pass over target location
@@ -668,20 +720,31 @@ class LcarsSatelliteTracker(LcarsWidget):
                         pygame.draw.line(surface, (0, 200, 200), p1, p2, 1)
     
     def _draw_all_satellites(self, surface):
-        """Draw all satellite positions when none is selected"""
+        """Draw all satellite positions, highlighting selected one if any"""
         if not self.satellite_info:
             return
         
-        font_small = pygame.font.Font("assets/swiss911.ttf", 16)  # Increased from 12
+        font_small = pygame.font.Font("assets/swiss911.ttf", 18)  # INCREASED from 16
         
         for sat_name, info in self.satellite_info.items():
             pos = self._latlon_to_screen(info['lat'], info['lon'])
             
-            pygame.draw.circle(surface, (255, 153, 0), pos, 4)
-            pygame.draw.circle(surface, (255, 255, 255), pos, 2)
+            # Check if this is the selected satellite
+            is_selected = (sat_name == self.selected_satellite)
             
-            label_text = font_small.render(sat_name, True, (255, 153, 0))
-            label_rect = label_text.get_rect(topleft=(pos[0] + 6, pos[1] - 6))
+            if is_selected:
+                # HIGHLIGHTED: Selected satellite - larger and brighter
+                pygame.draw.circle(surface, (255, 0, 0), pos, 8)  # Larger red circle
+                pygame.draw.circle(surface, (255, 255, 255), pos, 4)  # White center
+                color = (255, 255, 0)  # Yellow text for selected
+            else:
+                # NORMAL: Regular satellite markers
+                pygame.draw.circle(surface, (255, 153, 0), pos, 6)
+                pygame.draw.circle(surface, (255, 255, 255), pos, 3)
+                color = (255, 153, 0)  # Orange text for unselected
+            
+            label_text = font_small.render(sat_name, True, color)
+            label_rect = label_text.get_rect(topleft=(pos[0] + 8, pos[1] - 8))  # ADJUSTED offset
             
             bg_surf = pygame.Surface((label_rect.width + 4, label_rect.height + 2))
             bg_surf.set_alpha(180)
@@ -694,7 +757,7 @@ class LcarsSatelliteTracker(LcarsWidget):
         if not self.satellite_info or not self.selected_satellite:
             return
         
-        font_small = pygame.font.Font("assets/swiss911.ttf", 14)  # Increased from 10
+        font_small = pygame.font.Font("assets/swiss911.ttf", 16)  # INCREASED from 14
         
         for sat_name, info in self.satellite_info.items():
             if sat_name == self.selected_satellite:
@@ -702,11 +765,12 @@ class LcarsSatelliteTracker(LcarsWidget):
             
             pos = self._latlon_to_screen(info['lat'], info['lon'])
             
-            pygame.draw.circle(surface, (150, 100, 0), pos, 3)
-            pygame.draw.circle(surface, (200, 200, 200), pos, 1)
+            # INCREASED: Larger dimmed satellites (was 3/1)
+            pygame.draw.circle(surface, (150, 100, 0), pos, 5)
+            pygame.draw.circle(surface, (200, 200, 200), pos, 2)
             
             label_text = font_small.render(sat_name, True, (150, 100, 0))
-            label_rect = label_text.get_rect(topleft=(pos[0] + 5, pos[1] - 5))
+            label_rect = label_text.get_rect(topleft=(pos[0] + 7, pos[1] - 7))  # ADJUSTED offset
             
             bg_surf = pygame.Surface((label_rect.width + 3, label_rect.height + 2))
             bg_surf.set_alpha(150)
@@ -721,11 +785,13 @@ class LcarsSatelliteTracker(LcarsWidget):
         
         pos = self._latlon_to_screen(self.current_lat, self.current_lon)
         
-        # Pulse effect
-        pulse_size = int(6 + 2 * np.sin(self.pulse_phase))
+        # ENHANCED: Larger pulse effect for better visibility
+        pulse_size = int(10 + 4 * np.sin(self.pulse_phase))  # INCREASED from (6 + 2)
         
+        # Draw pulsing outer circle
         pygame.draw.circle(surface, (255, 0, 0), pos, pulse_size)
-        pygame.draw.circle(surface, (255, 255, 255), pos, 2)
+        # Draw solid inner circle
+        pygame.draw.circle(surface, (255, 255, 255), pos, 4)  # INCREASED from 2
         
         # Draw line to target if satellite is selected
         if self.selected_satellite:
@@ -742,12 +808,12 @@ class LcarsSatelliteTracker(LcarsWidget):
             else:
                 line_color = (100, 100, 100)  # Gray - not receivable
             
-            pygame.draw.line(surface, line_color, pos, target_pos, 1)
+            pygame.draw.line(surface, line_color, pos, target_pos, 2)  # THICKER line
     
     def _draw_info_overlay(self, surface):
         """Draw text information overlay"""
-        font_medium = pygame.font.Font("assets/swiss911.ttf", 20)  # Increased from 16
-        font_small = pygame.font.Font("assets/swiss911.ttf", 16)  # Increased from 12
+        font_medium = pygame.font.Font("assets/swiss911.ttf", 28)  # INCREASED from 24
+        font_small = pygame.font.Font("assets/swiss911.ttf", 22)  # INCREASED from 20
         
         if self.selected_satellite:
             # Top bar - satellite info
@@ -775,37 +841,44 @@ class LcarsSatelliteTracker(LcarsWidget):
             if self.pass_segments and len(self.pass_segments) > 0:
                 y_offset = self.display_height - 25
                 
-                for i, pass_info in enumerate(self.pass_segments[:2]):  # Show only next 2 passes
+                # Reverse the order so Pass 1 (soonest) appears at bottom
+                passes_to_show = list(reversed(self.pass_segments[:2]))
+                
+                for i, pass_info in enumerate(passes_to_show):
+                    # Pass number should count from closest (1) to furthest (2)
+                    pass_number = len(passes_to_show) - i
+                    
                     start_min = pass_info['start_minute']
                     duration_min = pass_info['duration']
                     max_elev = pass_info['max_elevation']
+                    direction = pass_info.get('direction', '?')  # NEW: Get direction (default '?' if missing)
                     
                     # Determine color based on how soon
                     if start_min < 0:
                         # Pass is happening now!
-                        pass_text = "PASS {} IN PROGRESS! (max elev: {:.0f}°, dur: {:.0f} min)".format(
-                            i + 1, max_elev, duration_min
+                        pass_text = "PASS {} IN PROGRESS! ({}, max elev: {:.0f}°, dur: {:.0f} min)".format(
+                            pass_number, direction, max_elev, duration_min
                         )
                         pass_color = (0, 255, 0)  # Bright green
                     elif start_min < 60:
                         # Less than 1 hour
-                        pass_text = "Pass {} in {} min (max elev: {:.0f}°, dur: {:.0f} min)".format(
-                            i + 1, start_min, max_elev, duration_min
+                        pass_text = "Pass {} in {} min ({}, max elev: {:.0f}°, dur: {:.0f} min)".format(
+                            pass_number, start_min, direction, max_elev, duration_min
                         )
                         pass_color = (255, 255, 0)  # Yellow
                     elif start_min < 360:
                         # Less than 6 hours
                         hours = start_min // 60
                         mins = start_min % 60
-                        pass_text = "Pass {} in {}h{}m (max elev: {:.0f}°, dur: {:.0f} min)".format(
-                            i + 1, hours, mins, max_elev, duration_min
+                        pass_text = "Pass {} in {}h{}m ({}, max elev: {:.0f}°, dur: {:.0f} min)".format(
+                            pass_number, hours, mins, direction, max_elev, duration_min
                         )
                         pass_color = (153, 153, 255)  # Light blue
                     else:
                         # More than 6 hours
                         hours = start_min // 60
-                        pass_text = "Pass {} in ~{}h (max elev: {:.0f}°, dur: {:.0f} min)".format(
-                            i + 1, hours, max_elev, duration_min
+                        pass_text = "Pass {} in ~{}h ({}, max elev: {:.0f}°, dur: {:.0f} min)".format(
+                            pass_number, hours, direction, max_elev, duration_min
                         )
                         pass_color = (100, 100, 200)  # Dimmer blue
                     
@@ -889,12 +962,16 @@ class LcarsSatelliteTracker(LcarsWidget):
         self._draw_earth_map(self.image)
         self._draw_target_crosshair(self.image)  # Always draw target
         
-        if self.selected_satellite:
+        # Drawing logic based on selection and tracking state
+        if self.tracking_enabled and self.selected_satellite:
+            # SCAN activated: Show detailed track, hide other satellites
             self._draw_future_track(self.image)
             self._draw_ground_track(self.image)
             self._draw_other_satellites(self.image)
             self._draw_satellite_position(self.image)
         else:
+            # Normal view: Show all satellites with mini trails
+            # Selected satellite will be highlighted but all are visible
             self._draw_mini_trails(self.image)
             self._draw_all_satellites(self.image)
         
@@ -933,10 +1010,14 @@ class LcarsSatelliteTracker(LcarsWidget):
                 
                 if closest_sat:
                     if self.selected_satellite == closest_sat:
+                        # Deselect if clicking same satellite
                         self.selected_satellite = None
+                        self.tracking_enabled = False
                         print("Deselected satellite")
                     else:
+                        # Just select satellite (don't calculate track yet)
                         self.selected_satellite = closest_sat
+                        
                         freq = None
                         mod = None
                         for sat_name, f, m in self.satellite_list:
@@ -946,10 +1027,12 @@ class LcarsSatelliteTracker(LcarsWidget):
                                 break
                         print("Selected satellite: {} ({} MHz {})".format(
                             closest_sat, freq, mod))
+                        print("Press SCAN to show detailed track")
                     return True
                 else:
                     if self.selected_satellite:
                         self.selected_satellite = None
+                        self.tracking_enabled = False
                         print("Deselected satellite")
                         return True
         

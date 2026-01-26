@@ -11,6 +11,9 @@ import numpy as np
 from ui.widgets.sprite import LcarsWidget
 from ui.widgets.process_manager import get_process_manager
 
+# Selection indicator color (purple for better visibility over waterfall data)
+SELECTION_COLOR = (204, 153, 204)  # LCARS purple
+
 class LcarsWaterfall(LcarsWidget):
     """
     Waterfall display widget for live SDR spectrum visualization
@@ -322,13 +325,13 @@ class LcarsWaterfall(LcarsWidget):
         """
         self.demodulator = demodulator
     
-    def _normalize_to_color_range(self, data, vmin=-70, vmax=40):
+    def _normalize_to_color_range(self, data, vmin=-90, vmax=40):
         """
         Normalize dB values to 0-255 range for color mapping
         
         Args:
             data: Array of dB values
-            vmin: Minimum dB value (maps to 0/blue)
+            vmin: Minimum dB value (maps to 0/blue) - Changed from -70 to -90 for better noise floor
             vmax: Maximum dB value (maps to 255/red)
         """
         # Clip to range
@@ -468,25 +471,26 @@ class LcarsWaterfall(LcarsWidget):
                 # Create semi-transparent overlay
                 bandwidth_surface = pygame.Surface((box_width, box_height))
                 bandwidth_surface.set_alpha(60)  # Very transparent
-                bandwidth_surface.fill((255, 255, 0))  # Yellow tint
+                bandwidth_surface.fill(SELECTION_COLOR)  # Purple tint
                 surface.blit(bandwidth_surface, (x_left, self.psd_height))
                 
                 # Draw border of bandwidth box
-                pygame.draw.rect(surface, (255, 255, 0), 
+                pygame.draw.rect(surface, SELECTION_COLOR, 
                                (x_left, self.psd_height, box_width, box_height), 2)
         
-        # Draw vertical line at selected frequency (center of filter)
-        pygame.draw.line(surface, (255, 255, 0), 
-                        (self.selected_x, self.psd_height), 
+        # Draw vertical line through ENTIRE display (including PSD area)
+        # This makes it much easier to see the selection in both the waterfall and PSD
+        pygame.draw.line(surface, SELECTION_COLOR, 
+                        (self.selected_x, 0),  # Start from top of PSD
                         (self.selected_x, self.display_height - 40), 
-                        2)
+                        3)  # Slightly thicker for visibility
         
         # Draw crosshair at top
         crosshair_y = self.psd_height + 20
-        pygame.draw.line(surface, (255, 255, 0),
+        pygame.draw.line(surface, SELECTION_COLOR,
                         (self.selected_x - 10, crosshair_y),
                         (self.selected_x + 10, crosshair_y), 2)
-        pygame.draw.line(surface, (255, 255, 0),
+        pygame.draw.line(surface, SELECTION_COLOR,
                         (self.selected_x, crosshair_y - 10),
                         (self.selected_x, crosshair_y + 10), 2)
         
@@ -501,7 +505,7 @@ class LcarsWaterfall(LcarsWidget):
             bw_text = "{:.0f} Hz filter".format(filter_bandwidth_hz)
         label_text = "{:.3f} MHz ({})".format(freq_mhz, bw_text)
         
-        text = font.render(label_text, True, (255, 255, 0))
+        text = font.render(label_text, True, SELECTION_COLOR)
         text_rect = text.get_rect(center=(self.selected_x, crosshair_y + 30))
         
         # Draw background for text
