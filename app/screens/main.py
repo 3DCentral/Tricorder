@@ -92,7 +92,7 @@ class ScreenMain(LcarsScreen):
             # {'name': 'Street Map', 'description': 'Roads and labels', 'widget': None},
         ]
         self.current_geospatial_mode = 0  # Index into geospatial_modes
-        self.topo_pan_speed = 50  # Topographical map pan speed
+        self.topo_pan_speed = 100  # Topographical map pan speed
 
         # OLD dashboard (static images) - keeping for fallback
         self.dashboard = LcarsImage("assets/geo.png", (187, 299))
@@ -581,7 +581,13 @@ class ScreenMain(LcarsScreen):
             if os.path.exists(self.dem_file_path):
                 print("Loading topographical data...")
                 self.topo_map.load_dem(self.dem_file_path)
-        
+                
+                # NEW: Set initial center to target coordinates
+                # 37°31'45.2"N 77°27'11.4"W = 37.52922°N, 77.45317°W
+                if hasattr(self.topo_map, 'set_view_from_center'):
+                    self.topo_map.set_view_from_center(37.52922, -77.45317, 6)  # zoom index 5 = 1.0x
+                    print("Centered topo map on target coordinates: 37.52922°N, 77.45317°W")
+                    
         # Load Geological data if needed
         elif mode_index == 1 and self.geological_map.gdf is None:
             if os.path.exists(self.geojson_file_path):
@@ -626,7 +632,21 @@ class ScreenMain(LcarsScreen):
         self._update_geospatial_mode_menu()
             
     def scanHandler(self, item, event, clock):
-        """SCAN: Start wide spectrum survey with frequency selection OR zoom in on map"""
+        """SCAN: Start wide spectrum survey with frequency selection OR zoom in on map OR enable satellite tracking"""
+        
+        # Satellite Tracker: Enable detailed tracking for selected satellite
+        if hasattr(self, 'satellite_tracker') and self.satellite_tracker.visible:
+            if self.satellite_tracker.tracking_enabled:
+                # Already tracking - disable to return to overview
+                self.satellite_tracker.disable_tracking()
+                print("Tracking disabled - showing all satellites")
+            else:
+                # Not tracking - try to enable
+                if self.satellite_tracker.enable_tracking():
+                    print("Tracking enabled - calculating ground tracks...")
+                else:
+                    print("No satellite selected - select one first by tapping it")
+            return
         
         # Geospatial mode: Zoom in on clicked location
         if self.dashboard.visible or self.topo_map.visible or self.geological_map.visible:
@@ -640,17 +660,6 @@ class ScreenMain(LcarsScreen):
                 print("SCAN: Current mode does not support zoom")
             return
             
-        if self.satellite_tracker.visible:
-            if self.satellite_tracker.tracking_enabled:
-                # Already tracking - toggle off
-                self.satellite_tracker.disable_tracking()
-            else:
-                # Not tracking - try to enable
-                if self.satellite_tracker.selected_satellite:
-                    self.satellite_tracker.enable_tracking()
-                else:
-                    print("Select a satellite first by tapping it")
-            
         if self.microscope_gadget.visible:
             if not self.micro.scanning:
                 self.micro.cam.start()
@@ -663,16 +672,6 @@ class ScreenMain(LcarsScreen):
             self.spectro.scanning = True
             
         if self.waterfall_display.visible:
-            # FIXED: Stop the live scan process and demodulation before switching modes
-            if self.waterfall_display.scan_active:
-                print("Stopping live waterfall scan...")
-                self._stop_live_scan()
-                sleep(0.3)  # Give SDR time to close
-            
-            if self.demodulator.is_active():
-                print("Stopping demodulation...")
-                self._stop_fm_demodulation()
-            
             self.waterfall_display.visible = False
             self.frequency_selector.visible = True
             if self.spectrum_scan_display.scan_complete:
@@ -813,15 +812,10 @@ class ScreenMain(LcarsScreen):
                 if self.waterfall_display.visible and not self.waterfall_display.scan_active:
                     print("Restarting live waterfall scan...")
                     sleep(0.5)
-                    # FIXED: Restart waterfall at its ORIGINAL center frequency, not the demod frequency
-                    original_center_freq = self.waterfall_display.center_frequency
-                    if original_center_freq:
-                        self.waterfall_display.start_scan(original_center_freq)
-                        print("Live waterfall scan restarted at {:.3f} MHz".format(original_center_freq / 1e6))
-                    else:
-                        # Fallback if center_frequency wasn't set
-                        self.waterfall_display.start_scan(target_freq_hz)
-                        print("Live waterfall scan restarted at {:.3f} MHz (no previous center)".format(target_freq / 1e6))
+                    # BUG FIX: Use waterfall's original center_frequency, not selected_frequency
+                    restart_freq = self.waterfall_display.center_frequency if self.waterfall_display.center_frequency else target_freq_hz
+                    self.waterfall_display.start_scan(restart_freq)
+                    print("Live waterfall scan restarted at {:.3f} MHz".format(restart_freq / 1e6))
             else:
                 self.demodulator.start_demodulation(target_freq_hz, filter_width)
                 self._updateDemodulationInfo(target_freq_hz)
@@ -831,7 +825,44 @@ class ScreenMain(LcarsScreen):
         
             
     def analyzeHandler(self, item, event, clock):
-        """ANALYZE: Start/stop live waterfall scan OR review microscope images OR zoom out on map"""
+        """ANALYZE: Start/stop live waterfall scan OR review microscope images OR zoom out on map OR jump to waterfall from satellite"""
+        
+        # Satellite Tracker: Jump to waterfall if satellite selected
+        if hasattr(self, 'satellite_tracker') and self.satellite_tracker.visible:
+            if self.satellite_tracker.selected_satellite:
+                # Get the frequency for the selected satellite
+                sat_name = self.satellite_tracker.selected_satellite
+                target_freq = None
+                
+                for name, freq_mhz, mode in self.satellite_tracker.satellite_list:
+                    if name == sat_name:
+                        target_freq = int(freq_mhz * 1e6)  # Convert MHz to Hz
+                        break
+                
+                if target_freq:
+                    print("Jumping to waterfall for {} at {:.4f} MHz".format(sat_name, target_freq / 1e6))
+                    
+                    # Hide satellite tracker and weather mode
+                    self.satellite_tracker.visible = False
+                    self.weather.visible = False
+                    
+                    # Show EMF mode waterfall
+                    self.emf_gadget.visible = False
+                    self.frequency_selector.visible = False
+                    self.spectrum_scan_display.visible = False
+                    
+                    # Start live waterfall at satellite frequency
+                    self.waterfall_display.start_scan(target_freq)
+                    self.waterfall_display.visible = True
+                    self.waterfall_display.set_selected_frequency(target_freq)
+                    
+                    self._updateDemodulationInfo(target_freq)
+                    print("Live waterfall started - use RECORD to demodulate")
+                else:
+                    print("ERROR: Could not find frequency for {}".format(sat_name))
+            else:
+                print("No satellite selected - select one first by tapping it")
+            return
         
         # Geospatial mode: Zoom out on clicked location
         if self.topo_map.visible or self.dashboard.visible or self.geological_map.visible:
@@ -1041,6 +1072,12 @@ class ScreenMain(LcarsScreen):
             
             # Load the DEM (this is the slow part)
             self.topo_map.load_dem(self.dem_file_path)
+
+            # NEW: Set initial center to target coordinates
+            # 37°31'45.2"N 77°27'11.4"W = 37.52922°N, 77.45317°W
+            if hasattr(self.topo_map, 'set_view_from_center'):
+                self.topo_map.set_view_from_center(37.52922, -77.45317, 6)  # zoom index 5 = 1.0x
+                print("Centered topo map on target coordinates: 37.52922°N, 77.45317°W")
         
         # Set up map mode selection menu
         self._update_geospatial_mode_menu()
