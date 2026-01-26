@@ -68,6 +68,52 @@ def remove_dc_spike(frequencies, psd, center_freq, window_hz=50000):
     return psd_fixed
 
 
+def merge_overlapping_data(frequencies, psd_data, bin_width_hz=1000):
+    """
+    Merge overlapping frequency data by binning and averaging
+    
+    When scanning with overlap, the same frequency appears multiple times.
+    This function bins the data and averages overlapping measurements.
+    
+    Args:
+        frequencies: Array of frequency values (may have duplicates)
+        psd_data: Array of PSD values (linear scale, not dB)
+        bin_width_hz: Width of frequency bins for averaging (Hz)
+    
+    Returns:
+        merged_freq: Unique frequency array (sorted)
+        merged_psd: Averaged PSD values for each frequency bin
+    """
+    # Find frequency range
+    freq_min = np.min(frequencies)
+    freq_max = np.max(frequencies)
+    
+    # Create frequency bins
+    num_bins = int(np.ceil((freq_max - freq_min) / bin_width_hz))
+    bins = np.linspace(freq_min, freq_max, num_bins + 1)
+    
+    # Digitize frequencies into bins
+    bin_indices = np.digitize(frequencies, bins)
+    
+    # Average PSD values within each bin
+    merged_freq = []
+    merged_psd = []
+    
+    for bin_idx in range(1, len(bins)):
+        # Find all data points in this bin
+        in_bin = bin_indices == bin_idx
+        
+        if np.any(in_bin):
+            # Average frequency and PSD for this bin
+            avg_freq = np.mean(frequencies[in_bin])
+            avg_psd = np.mean(psd_data[in_bin])  # Average in linear scale
+            
+            merged_freq.append(avg_freq)
+            merged_psd.append(avg_psd)
+    
+    return np.array(merged_freq), np.array(merged_psd)
+
+
 def plot_progress(frequencies, psd_db, start_freq, end_freq, step_num, total_steps):
     """Create progress spectrum plot during scanning"""
     fig = plt.figure(figsize=(6.4, 3.36), dpi=100)
@@ -209,27 +255,31 @@ def scan_frequency_range(start_freq, end_freq, sample_rate=2.4e6, gain=40, show_
         
         print()
         
-        # Add to collection
+        # Add to collection (raw data for now, we'll merge overlaps later)
         all_frequencies.extend(frequencies.tolist())
         all_psd_data.extend(psd.tolist())
         
         # Generate progress image if requested
         if show_progress and len(all_frequencies) > 0:
-            # Convert accumulated data to arrays
-            temp_freq = np.array(all_frequencies)
-            temp_psd = np.array(all_psd_data)
-            temp_psd_db = 10 * np.log10(temp_psd + 1e-10)
+            # For progress view, use merged data
+            merged_freq, merged_psd = merge_overlapping_data(
+                np.array(all_frequencies), 
+                np.array(all_psd_data)
+            )
+            temp_psd_db = 10 * np.log10(merged_psd + 1e-10)
             
             # Plot progress
-            plot_progress(temp_freq, temp_psd_db, start_freq, end_freq, step_num+1, num_steps)
+            plot_progress(merged_freq, temp_psd_db, start_freq, end_freq, step_num+1, num_steps)
     
     sdr.close()
     
-    # Sort by frequency
-    sorted_data = sorted(zip(all_frequencies, all_psd_data))
-    all_frequencies, all_psd_data = zip(*sorted_data)
+    # Merge overlapping data points by averaging
+    print("\nMerging overlapping frequency data...")
     all_frequencies = np.array(all_frequencies)
     all_psd_data = np.array(all_psd_data)
+    
+    # Call the merge function
+    all_frequencies, all_psd_data = merge_overlapping_data(all_frequencies, all_psd_data)
     
     print()
     print("="*60)

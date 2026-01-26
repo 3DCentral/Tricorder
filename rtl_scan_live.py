@@ -25,14 +25,46 @@ from collections import deque
 from rtlsdr import RtlSdr
 from scipy.interpolate import interp1d
 
+# Import demodulator's frequency-dependent parameter function
+# This is the SINGLE SOURCE OF TRUTH for all frequency-dependent settings
+try:
+    # Try importing from the app structure
+    from app.ui.widgets.demodulator import LcarsDemodulator
+    _demod_instance = LcarsDemodulator()
+    
+    def get_optimal_sample_rate(center_freq_hz):
+        """Get optimal sample rate from demodulator's configuration"""
+        params = _demod_instance.get_demodulation_params(center_freq_hz)
+        return params['sample_rate']
+    
+    print("Using demodulator's frequency configuration (single source of truth)")
+    
+except ImportError as e:
+    print("Warning: Could not import demodulator - using built-in defaults")
+    print("  Error: {}".format(e))
+    
+    def get_optimal_sample_rate(center_freq_hz):
+        """Fallback function if demodulator is not available"""
+        freq_mhz = center_freq_hz / 1e6
+        if 156.0 <= freq_mhz <= 163.0:
+            return 250000  # NOAA/Marine - narrow
+        elif 118.0 <= freq_mhz <= 148.0:
+            return 250000  # Aviation/2m Ham - narrow
+        elif 88.0 <= freq_mhz <= 108.0:
+            return 1200000  # FM Broadcast - wide
+        elif 420.0 <= freq_mhz <= 467.0:
+            return 250000  # UHF narrow-band
+        else:
+            return 2400000  # Default - wide
+
 # Configuration
-DEFAULT_SAMPLE_RATE = 2.4e6  # 2.4 MHz bandwidth
-DEFAULT_WATERFALL_LINES = 150  # 5 seconds at 30 updates/sec
-FFT_SIZE = 2048  # INCREASED from 1024 for better resolution
-UPDATE_INTERVAL = 0.0165  # ~60 Hz update rate
-GAIN = 40  # FIXED: Was 4 dB (too low!) - now matches working rtl_scan_2.py
-FREQ_CORRECTION = 60  # PPM correction
-NUM_AVERAGES = 4  # NEW: Average multiple FFTs for smoother display
+DEFAULT_SAMPLE_RATE = 2.4e6  # Default if demodulator lookup fails
+DEFAULT_WATERFALL_LINES = 150
+FFT_SIZE = 2048
+UPDATE_INTERVAL = 0.0165
+GAIN = 40
+FREQ_CORRECTION = 60
+NUM_AVERAGES = 4
 
 # Output file paths
 OUTPUT_DIR = "/tmp/"
@@ -95,7 +127,16 @@ def parse_args():
         sys.exit(1)
     
     center_freq = float(sys.argv[1])
-    sample_rate = float(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_SAMPLE_RATE
+    
+    # If sample rate not specified, use adaptive rate based on frequency
+    if len(sys.argv) > 2:
+        sample_rate = float(sys.argv[2])
+        print("Using user-specified sample rate: {:.3f} MHz".format(sample_rate/1e6))
+    else:
+        sample_rate = get_optimal_sample_rate(center_freq)
+        print("Using adaptive sample rate for {:.3f} MHz: {:.3f} MHz".format(
+            center_freq/1e6, sample_rate/1e6))
+    
     waterfall_lines = int(sys.argv[3]) if len(sys.argv) > 3 else DEFAULT_WATERFALL_LINES
     
     return center_freq, sample_rate, waterfall_lines
@@ -108,19 +149,59 @@ def setup_sdr(center_freq, sample_rate):
     print("  Sample rate: {:.3f} MHz".format(sample_rate/1e6))
     print("  Bandwidth: {:.3f} MHz".format(sample_rate/1e6))
     
-    sdr = RtlSdr()
-    sdr.sample_rate = sample_rate
-    sdr.center_freq = int(center_freq)
-    sdr.freq_correction = FREQ_CORRECTION
-    sdr.gain = GAIN
+    # Validate frequency range
+    if center_freq < 24e6 or center_freq > 1766e6:
+        print("\n WARNING: Frequency {:.3f} MHz is outside typical RTL-SDR range (24-1766 MHz)".format(
+            center_freq/1e6))
+        print("  This may not work properly!")
     
-    # Discard initial samples to let hardware settle
-    _ = sdr.read_samples(2048)
+    # Validate sample rate
+    if sample_rate < 225001 or sample_rate > 3200000:
+        print("\n WARNING: Sample rate {:.3f} MHz is outside recommended range (0.225-3.2 MHz)".format(
+            sample_rate/1e6))
+        print("  Adjusting to safe value...")
+        sample_rate = max(225001, min(3200000, sample_rate))
+        print("  New sample rate: {:.3f} MHz".format(sample_rate/1e6))
     
-    print("  Gain: {} dB (FIXED - was 4 dB)".format(sdr.gain))
-    print("SDR initialized successfully!")
-    
-    return sdr
+    try:
+        sdr = RtlSdr()
+        sdr.sample_rate = sample_rate
+        sdr.center_freq = int(center_freq)
+        sdr.freq_correction = FREQ_CORRECTION
+        sdr.gain = GAIN
+        
+        # Verify settings were applied
+        actual_freq = sdr.center_freq
+        actual_rate = sdr.sample_rate
+        
+        print("  Actual center freq: {:.3f} MHz".format(actual_freq/1e6))
+        print("  Actual sample rate: {:.3f} MHz".format(actual_rate/1e6))
+        
+        if abs(actual_freq - center_freq) > 1000:
+            print("   Frequency mismatch detected!")
+        
+        if abs(actual_rate - sample_rate) > 1000:
+            print("   Sample rate mismatch detected!")
+        
+        # Discard initial samples to let hardware settle
+        print("  Settling hardware...")
+        _ = sdr.read_samples(4096)  # Read more samples for better settling
+        
+        print("  Gain: {} dB (FIXED - was 4 dB)".format(sdr.gain))
+        print("SDR initialized successfully!")
+        
+        return sdr
+        
+    except Exception as e:
+        print("\n ERROR: Failed to initialize SDR!")
+        print("  Error: {}".format(str(e)))
+        print("\nTroubleshooting:")
+        print("  1. Check RTL-SDR is connected")
+        print("  2. Try different sample rate (250 kHz - 2.4 MHz)")
+        print("  3. Check frequency is in valid range (24-1766 MHz)")
+        print("  4. Kill any other processes using RTL-SDR:")
+        print("     killall rtl_fm rtl_sdr rtl_test")
+        raise
 
 
 def compute_psd_averaged(sdr, fft_size, num_averages):
