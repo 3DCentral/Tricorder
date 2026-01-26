@@ -640,6 +640,17 @@ class ScreenMain(LcarsScreen):
                 print("SCAN: Current mode does not support zoom")
             return
             
+        if self.satellite_tracker.visible:
+            if self.satellite_tracker.tracking_enabled:
+                # Already tracking - toggle off
+                self.satellite_tracker.disable_tracking()
+            else:
+                # Not tracking - try to enable
+                if self.satellite_tracker.selected_satellite:
+                    self.satellite_tracker.enable_tracking()
+                else:
+                    print("Select a satellite first by tapping it")
+            
         if self.microscope_gadget.visible:
             if not self.micro.scanning:
                 self.micro.cam.start()
@@ -652,6 +663,16 @@ class ScreenMain(LcarsScreen):
             self.spectro.scanning = True
             
         if self.waterfall_display.visible:
+            # FIXED: Stop the live scan process and demodulation before switching modes
+            if self.waterfall_display.scan_active:
+                print("Stopping live waterfall scan...")
+                self._stop_live_scan()
+                sleep(0.3)  # Give SDR time to close
+            
+            if self.demodulator.is_active():
+                print("Stopping demodulation...")
+                self._stop_fm_demodulation()
+            
             self.waterfall_display.visible = False
             self.frequency_selector.visible = True
             if self.spectrum_scan_display.scan_complete:
@@ -792,8 +813,15 @@ class ScreenMain(LcarsScreen):
                 if self.waterfall_display.visible and not self.waterfall_display.scan_active:
                     print("Restarting live waterfall scan...")
                     sleep(0.5)
-                    self.waterfall_display.start_scan(target_freq_hz)
-                    print("Live waterfall scan restarted at {:.3f} MHz".format(target_freq))
+                    # FIXED: Restart waterfall at its ORIGINAL center frequency, not the demod frequency
+                    original_center_freq = self.waterfall_display.center_frequency
+                    if original_center_freq:
+                        self.waterfall_display.start_scan(original_center_freq)
+                        print("Live waterfall scan restarted at {:.3f} MHz".format(original_center_freq / 1e6))
+                    else:
+                        # Fallback if center_frequency wasn't set
+                        self.waterfall_display.start_scan(target_freq_hz)
+                        print("Live waterfall scan restarted at {:.3f} MHz (no previous center)".format(target_freq / 1e6))
             else:
                 self.demodulator.start_demodulation(target_freq_hz, filter_width)
                 self._updateDemodulationInfo(target_freq_hz)
