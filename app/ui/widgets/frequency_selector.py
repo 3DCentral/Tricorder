@@ -35,6 +35,11 @@ class LcarsFrequencySelector(LcarsWidget):
         # Scanning range (will be highlighted when scanning)
         self.scanning_range = None  # (start_freq, end_freq) in Hz
         
+        # NEW: Sweep range control
+        self.sweep_steps = 5  # Default: 5 sweeps
+        self.min_sweep_steps = 1
+        self.max_sweep_steps = 10
+        
     def freq_to_x(self, frequency):
         """Convert frequency to X pixel position using log scale
         
@@ -99,6 +104,59 @@ class LcarsFrequencySelector(LcarsWidget):
     def clear_scanning_range(self):
         """Clear the scanning range highlight"""
         self.scanning_range = None
+    
+    def adjust_sweep_steps(self, delta):
+        """Adjust the number of sweep steps
+        
+        Args:
+            delta: Change in steps (1 to increase, -1 to decrease)
+            
+        Returns:
+            True if changed, False if at limit
+        """
+        new_steps = self.sweep_steps + delta
+        
+        if new_steps < self.min_sweep_steps:
+            print("Minimum sweep steps: {}".format(self.min_sweep_steps))
+            return False
+        elif new_steps > self.max_sweep_steps:
+            print("Maximum sweep steps: {}".format(self.max_sweep_steps))
+            return False
+        
+        self.sweep_steps = new_steps
+        print("Sweep steps: {} (range: {:.1f} MHz)".format(
+            self.sweep_steps,
+            self.get_sweep_bandwidth() / 1e6
+        ))
+        return True
+    
+    def get_sweep_bandwidth(self):
+        """Calculate total bandwidth based on sweep steps
+        
+        Returns:
+            Total bandwidth in Hz (2.4 MHz per step)
+        """
+        # Each sweep is 2.4 MHz, so total bandwidth = steps * 2.4 MHz
+        return self.sweep_steps * 2.4e6
+    
+    def get_sweep_range(self):
+        """Get the sweep range for the current selected frequency
+        
+        Returns:
+            (start_freq, end_freq) tuple in Hz, or None if no frequency selected
+        """
+        if self.selected_frequency is None:
+            return None
+        
+        bandwidth = self.get_sweep_bandwidth()
+        start_freq = int(self.selected_frequency - bandwidth / 2)
+        end_freq = int(self.selected_frequency + bandwidth / 2)
+        
+        # Clamp to valid RTL-SDR range
+        start_freq = max(int(50e6), start_freq)
+        end_freq = min(int(2.2e9), end_freq)
+        
+        return (start_freq, end_freq)
     
     def _format_frequency(self, freq_hz):
         """Format frequency for display
@@ -236,6 +294,54 @@ class LcarsFrequencySelector(LcarsWidget):
             highlight_surface.fill((255, 153, 0))  # Orange
             surface.blit(highlight_surface, (x_start, y_base - 15))
     
+    def _draw_sweep_info(self, surface):
+        """Draw sweep step count and bandwidth info"""
+        if self.selected_frequency is None:
+            return
+        
+        # Display sweep info in top-left corner
+        font = pygame.font.Font("assets/swiss911.ttf", 16)
+        
+        bandwidth = self.get_sweep_bandwidth()
+        info_text = "Sweeps: {} | Range: {:.1f} MHz".format(
+            self.sweep_steps,
+            bandwidth / 1e6
+        )
+        
+        text = font.render(info_text, True, (255, 255, 0))
+        text_rect = text.get_rect(topleft=(10, 10))
+        
+        # Background for text
+        padding = 5
+        bg_rect = pygame.Rect(
+            text_rect.x - padding,
+            text_rect.y - padding,
+            text_rect.width + padding * 2,
+            text_rect.height + padding * 2
+        )
+        bg_surface = pygame.Surface((bg_rect.width, bg_rect.height))
+        bg_surface.set_alpha(180)
+        bg_surface.fill((0, 0, 0))
+        surface.blit(bg_surface, bg_rect)
+        surface.blit(text, text_rect)
+        
+        # Draw instruction text if range is displayed
+        if self.scanning_range is None:
+            instruction_text = "Use UP/DOWN to adjust sweep range"
+            inst_text = font.render(instruction_text, True, (255, 255, 0))
+            inst_rect = inst_text.get_rect(topleft=(10, 35))
+            
+            inst_bg_rect = pygame.Rect(
+                inst_rect.x - padding,
+                inst_rect.y - padding,
+                inst_rect.width + padding * 2,
+                inst_rect.height + padding * 2
+            )
+            inst_bg_surface = pygame.Surface((inst_bg_rect.width, inst_bg_rect.height))
+            inst_bg_surface.set_alpha(180)
+            inst_bg_surface.fill((0, 0, 0))
+            surface.blit(inst_bg_surface, inst_bg_rect)
+            surface.blit(inst_text, inst_rect)
     
     def update(self, screen):
         """Update and render the frequency selector"""
@@ -249,6 +355,7 @@ class LcarsFrequencySelector(LcarsWidget):
         self._draw_scale(self.image)
         self._draw_scanning_highlight(self.image)
         self._draw_selection_marker(self.image)
+        self._draw_sweep_info(self.image)
         
         # Blit to screen
         screen.blit(self.image, self.rect)
