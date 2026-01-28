@@ -711,20 +711,25 @@ class ScreenMain(LcarsScreen):
                 if target_freq is None:
                     print("Please select a target frequency first")
                     return
-                bandwidth = 10e6
-                
-                start_freq = int(target_freq - bandwidth / 2)
-                end_freq = int(target_freq + bandwidth / 2)
-                
-                start_freq = max(int(50e6), start_freq)
-                end_freq = min(int(2.2e9), end_freq)
+                # Use dynamic sweep range from frequency_selector
+                sweep_range = self.frequency_selector.get_sweep_range()
+                if sweep_range:
+                    start_freq, end_freq = sweep_range
+                else:
+                    # Fallback to default 10 MHz if method not available
+                    bandwidth = 10e6
+                    start_freq = int(target_freq - bandwidth / 2)
+                    end_freq = int(target_freq + bandwidth / 2)
+                    start_freq = max(int(50e6), start_freq)
+                    end_freq = min(int(2.2e9), end_freq)
                 
                 self.current_scan_start_freq = start_freq
                 self.current_scan_end_freq = end_freq
                 
-                print("Starting spectrum scan: {} to {}".format(
+                print("Starting spectrum scan: {} to {} ({} sweeps)".format(
                     self.frequency_selector._format_frequency(start_freq),
-                    self.frequency_selector._format_frequency(end_freq)
+                    self.frequency_selector._format_frequency(end_freq),
+                    self.frequency_selector.sweep_steps if hasattr(self.frequency_selector, 'sweep_steps') else '?'
                 ))
                 
                 self.emf.scanning = True
@@ -940,7 +945,7 @@ class ScreenMain(LcarsScreen):
        
     # Navigation handlers - NOW WITH FILTER WIDTH CONTROL (not bandwidth)
     def navHandlerUp(self, item, event, clock):
-        """Navigation Up: Pan north (map) OR increase filter width (waterfall)"""
+        """Navigation Up: Pan north (map) OR increase filter width (waterfall) OR increase sweep range (EMF)"""
         # Map pan: Pan north
         if self.topo_map.visible or self.dashboard.visible or self.geological_map.visible:
             current_widget = self.geospatial_modes[self.current_geospatial_mode]['widget']
@@ -948,16 +953,26 @@ class ScreenMain(LcarsScreen):
                 current_widget.pan(0, self.topo_pan_speed)
             return
         
-        # Waterfall: INCREASE FILTER WIDTH (changed from bandwidth)
+        # Waterfall: INCREASE FILTER WIDTH
         if self.waterfall_display.visible and self.waterfall_display.scan_active:
             self._adjust_waterfall_filter_width(1)
             return
         
-        # Microscope navigation
+        # EMF Frequency Selector: INCREASE SWEEP RANGE
+        if self.frequency_selector.visible and self.frequency_selector.selected_frequency:
+            if self.frequency_selector.adjust_sweep_steps(1):
+                # Update the displayed scanning range preview
+                sweep_range = self.frequency_selector.get_sweep_range()
+                if sweep_range:
+                    start_freq, end_freq = sweep_range
+                    self.frequency_selector.set_scanning_range(start_freq, end_freq)
+            return
+        
+        # Microscope navigation (go to first image)
         self._handleMicroscopeNavigation(review_index=0)
             
     def navHandlerDown(self, item, event, clock):
-        """Navigation Down: Pan south (map) OR decrease filter width (waterfall)"""
+        """Navigation Down: Pan south (map) OR decrease filter width (waterfall) OR decrease sweep range (EMF)"""
         # Map pan: Pan south
         if self.topo_map.visible or self.dashboard.visible or self.geological_map.visible:
             current_widget = self.geospatial_modes[self.current_geospatial_mode]['widget']
@@ -965,9 +980,19 @@ class ScreenMain(LcarsScreen):
                 current_widget.pan(0, -self.topo_pan_speed)
             return
         
-        # Waterfall: DECREASE FILTER WIDTH (changed from bandwidth)
+        # Waterfall: DECREASE FILTER WIDTH
         if self.waterfall_display.visible and self.waterfall_display.scan_active:
             self._adjust_waterfall_filter_width(-1)
+            return
+        
+        # EMF Frequency Selector: DECREASE SWEEP RANGE
+        if self.frequency_selector.visible and self.frequency_selector.selected_frequency:
+            if self.frequency_selector.adjust_sweep_steps(-1):
+                # Update the displayed scanning range preview
+                sweep_range = self.frequency_selector.get_sweep_range()
+                if sweep_range:
+                    start_freq, end_freq = sweep_range
+                    self.frequency_selector.set_scanning_range(start_freq, end_freq)
             return
         
         # Microscope navigation
