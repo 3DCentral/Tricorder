@@ -7,6 +7,7 @@ from ui.widgets.waterfall import LcarsWaterfall
 from ui.widgets.frequency_selector import LcarsFrequencySelector
 from ui.widgets.spectrum_scan_display import LcarsSpectrumScanDisplay
 from ui.widgets.demodulator import LcarsDemodulator
+from ui.widgets.antenna_analysis import LcarsAntennaAnalysis
 from ui.widgets.text_display import LcarsTextDisplay
 from ui.widgets.topo_map import LcarsTopoMap
 from ui.widgets.geological_map import LcarsGeologicalMap
@@ -169,6 +170,16 @@ class ScreenMain(LcarsScreen):
         # Connect demodulator to waterfall for bandwidth visualization
         self.waterfall_display.set_demodulator(self.demodulator)
         
+        # Antenna analysis widget for EMF mode
+        self.antenna_analysis = LcarsAntennaAnalysis((187, 299), (640, 480))
+        self.antenna_analysis.visible = False
+        all_sprites.add(self.antenna_analysis, layer=2)
+        
+        # Antenna scan state
+        self.antenna_scan_active = False
+        self.antenna_scan_process = None
+        self.last_antenna_check = 0
+        
         # Initialize spectrum checking throttle
         self.last_spectrum_check = 0
         
@@ -193,6 +204,56 @@ class ScreenMain(LcarsScreen):
             self.microscope_gadget.image = self.micro.micro_image
         if self.spectral_gadget.visible and (self.spectro.scanning or self.spectro.analyzing):
             self.spectral_gadget.image = self.spectro.micro_image
+        
+        # ANTENNA ANALYSIS UPDATES
+        if self.antenna_analysis.visible and self.antenna_scan_active:
+            current_time = pygame.time.get_ticks()
+            
+            # Check if scan process is still running
+            if self.antenna_scan_process:
+                poll_result = self.antenna_scan_process.poll()
+                if poll_result is not None:
+                    print("Antenna scan completed with code: {}".format(poll_result))
+                    self.antenna_scan_active = False
+                    self.antenna_analysis.complete_scan()
+                    
+                    # Load final results
+                    try:
+                        metadata_file = "/tmp/antenna_scan_metadata.json"
+                        if os.path.exists(metadata_file):
+                            import json
+                            with open(metadata_file, 'r') as f:
+                                metadata = json.load(f)
+                            print("Antenna scan complete: {} points measured".format(
+                                metadata.get('num_points', 0)))
+                    except:
+                        pass
+            
+            # Update display with latest data
+            if current_time - self.last_antenna_check > 200:  # Check every 200ms
+                self.last_antenna_check = current_time
+                try:
+                    # Load progress data
+                    frequencies = np.load("/tmp/antenna_scan_frequencies.npy", allow_pickle=True)
+                    sensitivities = np.load("/tmp/antenna_scan_sensitivities_normalized.npy", allow_pickle=True)
+                    noise_floors = np.load("/tmp/antenna_scan_noise_floors.npy", allow_pickle=True)
+                    
+                    # Validate data - all arrays must have same length and be non-empty
+                    if len(frequencies) == 0 or len(sensitivities) == 0 or len(noise_floors) == 0:
+                        # Data not ready yet
+                        pass
+                    elif len(frequencies) != len(sensitivities) or len(frequencies) != len(noise_floors):
+                        # Size mismatch - data is being written, skip this update
+                        pass
+                    else:
+                        # Clear and reload all data (simple approach)
+                        self.antenna_analysis.clear()
+                        for freq, sens, nf in zip(frequencies, sensitivities, noise_floors):
+                            self.antenna_analysis.add_data_point(freq, sens, nf)
+                    
+                except (IOError, OSError, FileNotFoundError, ValueError) as e:
+                    # Files don't exist yet, read error, or data corruption during write
+                    pass
         
         # LIVE EMF SPECTRUM UPDATES
         if self.spectrum_scan_display.visible and self.emf.scanning:
@@ -350,6 +411,7 @@ class ScreenMain(LcarsScreen):
         self._kill_all_sdr_processes()
         
         self.emf_gadget.visible = False
+        self.antenna_analysis.visible = False
         self.microscope_gadget.visible = False
         self.spectral_gadget.visible = False
         self.dashboard.visible = False
@@ -681,8 +743,35 @@ class ScreenMain(LcarsScreen):
             else:
                 self.spectrum_scan_display.visible = False
             
-        # EMF mode: Show frequency selector and handle scanning
-        if self.emf_gadget.visible or self.frequency_selector.visible or self.spectrum_scan_display.visible:
+        # EMF mode: Handle switching from antenna analysis to frequency selector, or start spectrum scan
+        if self.emf_gadget.visible or self.antenna_analysis.visible or self.frequency_selector.visible or self.spectrum_scan_display.visible:
+            
+            # If antenna analysis is visible, SCAN switches to frequency selector
+            if self.antenna_analysis.visible:
+                print("Switching to frequency selector mode")
+                self.antenna_analysis.visible = False
+                self.frequency_selector.visible = True
+                self.spectrum_scan_display.visible = False
+                
+                # Stop antenna scan if still running
+                if self.antenna_scan_active and self.antenna_scan_process:
+                    try:
+                        self.antenna_scan_process.terminate()
+                        self.antenna_scan_process.wait(timeout=1)
+                    except:
+                        pass
+                    self.antenna_scan_active = False
+                
+                # Restore previous scan range if available
+                if self.current_scan_start_freq and self.current_scan_end_freq:
+                    self.frequency_selector.set_scanning_range(
+                        self.current_scan_start_freq,
+                        self.current_scan_end_freq
+                    )
+                
+                print("Select a target frequency on the scale above")
+                return
+            
             # REMOVED: The "deactivate scan" block that required an extra SCAN press
             # Now users can select a new frequency and scan immediately!
             
@@ -1135,6 +1224,32 @@ class ScreenMain(LcarsScreen):
         self._switch_to_mode('emf')
         self.frequency_selector.visible = False
         self.spectrum_scan_display.visible = False
+        
+        # Show antenna analysis widget instead of static emf_gadget
+        self.emf_gadget.visible = False
+        self.antenna_analysis.visible = True
+        
+        # Auto-start antenna scan
+        if not self.antenna_scan_active:
+            print("Starting antenna characterization scan...")
+            self.antenna_scan_active = True
+            self.antenna_analysis.start_scan()
+            
+            # Clear old data files
+            for f in glob.glob("/tmp/antenna_scan_*"):
+                try:
+                    os.remove(f)
+                except:
+                    pass
+            
+            # Start antenna scan process
+            self.antenna_scan_process = self.process_manager.start_process(
+                'antenna_scanner',
+                ['python3', '/home/tricorder/rpi_lcars-master/rtl_antenna_scan.py', '40'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            print("Antenna scan started - ~10 seconds")
         
         self._updateDemodulationInfo(None)
         
