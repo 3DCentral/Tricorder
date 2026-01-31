@@ -13,6 +13,7 @@ from ui.widgets.topo_map import LcarsTopoMap
 from ui.widgets.geological_map import LcarsGeologicalMap
 from ui.widgets.screen import LcarsScreen
 from ui.widgets.process_manager import get_process_manager
+from ui.widgets.microscope_widget import LcarsMicroscopeWidget
 import numpy as np
 from time import sleep
 import subprocess
@@ -61,18 +62,16 @@ class ScreenMain(LcarsScreen):
         # gadgets
         all_sprites.add(LcarsGifImage("assets/gadgets/fwscan.gif", (356, 1058), 100), layer=1)
 
-        # microscope gadget
-        self.microscope_gadget = LcarsImage("assets/micro.png", (187, 299))
-        self.microscope_gadget_ref = LcarsImage("assets/micro_ref.png", (187, 299))
-        self.microscope_gadget.visible = False
-        self.microscope_gadget_ref.visible = False
-        all_sprites.add(self.microscope_gadget, layer=2)
-        all_sprites.add(self.microscope_gadget_ref, layer=2)
-
-        # Microscope file list display - positioned per user specification
-        # LcarsWidget position is (top, left) = (y, x)
-        # Position: y=135, x=1055, size 215x215
-        self.microscope_file_list = LcarsTextDisplay((135, 1055), (215, 215), font_size=16)
+        self.microscope_widget = LcarsMicroscopeWidget(
+            pos=(187, 299),
+            size=(640, 480),
+            camera=self.micro.cam,
+            screenshot_dir="/home/tricorder/rpi_lcars-master/app/screenshots",
+            micro_button=self.micro
+        )
+        all_sprites.add(self.microscope_widget, layer=2)
+        
+        self.microscope_file_list = LcarsTextDisplay((135, 1055), (215, 215), font_size=22)
         self.microscope_file_list.visible = True  # Always visible
         all_sprites.add(self.microscope_file_list, layer=4)
         
@@ -98,15 +97,12 @@ class ScreenMain(LcarsScreen):
         # OLD dashboard (static images) - keeping for fallback
         self.dashboard = LcarsImage("assets/geo.png", (187, 299))
         self.dashboard_ref = LcarsImage("assets/geo_ref.png", (187, 299))
-        self.dashboard.visible = False
-        self.dashboard_ref.visible = False
         all_sprites.add(self.dashboard, layer=2)
         all_sprites.add(self.dashboard_ref, layer=2)
 
         # NEW: Topographical map widget for Geospatial mode
         # DON'T load DEM on startup - only when mode is activated (lazy loading)
         self.topo_map = LcarsTopoMap((187, 299), (640, 480), dem_file_path=None)
-        self.topo_map.visible = False
         all_sprites.add(self.topo_map, layer=2)
         
         # Link topo_map to geospatial modes
@@ -115,7 +111,6 @@ class ScreenMain(LcarsScreen):
         # NEW: Geological map widget for Geospatial mode
         # DON'T load GeoJSON on startup - only when mode is activated (lazy loading)
         self.geological_map = LcarsGeologicalMap((187, 299), (640, 480), geojson_file=None)
-        self.geological_map.visible = False
         all_sprites.add(self.geological_map, layer=2)
         
         # Link geological_map to geospatial modes
@@ -128,34 +123,27 @@ class ScreenMain(LcarsScreen):
         # Satellite tracker for Atmospheric mode
         self.satellite_tracker = LcarsSatelliteTracker((187, 299), (640, 480), 
                                                        earth_map_path="assets/earth_map.jpg")
-        self.satellite_tracker.visible = False
         all_sprites.add(self.satellite_tracker, layer=2)
 
         self.weather = LcarsImage("assets/atmosph.png", (187, 299))
-        self.weather.visible = False
         all_sprites.add(self.weather, layer=2)
         
         self.emf_gadget = LcarsImage("assets/emf.png", (187, 299))
-        self.emf_gadget.visible = False
         all_sprites.add(self.emf_gadget, layer=2)
         
         self.spectral_gadget = LcarsImage("assets/spectral.png", (187, 299))
-        self.spectral_gadget.visible = False
         all_sprites.add(self.spectral_gadget, layer=2)
         
         # Waterfall display for live scanning
         self.waterfall_display = LcarsWaterfall((187, 299), (640, 480))
-        self.waterfall_display.visible = False
         all_sprites.add(self.waterfall_display, layer=2)
         
         # Frequency selector for SCAN mode (top 30%)
         self.frequency_selector = LcarsFrequencySelector((187, 299), (640, 144))
-        self.frequency_selector.visible = False
         all_sprites.add(self.frequency_selector, layer=2)
         
         # Interactive spectrum scan display for SCAN mode (bottom 70%)
         self.spectrum_scan_display = LcarsSpectrumScanDisplay((331, 299), (640, 336))
-        self.spectrum_scan_display.visible = False
         all_sprites.add(self.spectrum_scan_display, layer=2)
         
         # Dimensions for the scan display area
@@ -172,7 +160,6 @@ class ScreenMain(LcarsScreen):
         
         # Antenna analysis widget for EMF mode
         self.antenna_analysis = LcarsAntennaAnalysis((187, 299), (640, 480))
-        self.antenna_analysis.visible = False
         all_sprites.add(self.antenna_analysis, layer=2)
         
         # Antenna scan state
@@ -193,6 +180,9 @@ class ScreenMain(LcarsScreen):
         # Track scan frequency range
         self.current_scan_start_freq = None
         self.current_scan_end_freq = None
+        
+        # hide all widgets
+        self._hide_all_gadgets()
 
     def update(self, screenSurface, fpsClock):
         if pygame.time.get_ticks() - self.lastClockUpdate > 1000:
@@ -200,8 +190,7 @@ class ScreenMain(LcarsScreen):
             self.stardate.setText("STAR DATE {}".format(datetime.now().strftime("%y%m%d.")) + str(hour_formatted))
             self.lastClockUpdate = pygame.time.get_ticks()
         LcarsScreen.update(self, screenSurface, fpsClock)
-        if self.microscope_gadget.visible and self.micro.scanning:
-            self.microscope_gadget.image = self.micro.micro_image
+        
         if self.spectral_gadget.visible and (self.spectro.scanning or self.spectro.analyzing):
             self.spectral_gadget.image = self.spectro.micro_image
         
@@ -412,7 +401,6 @@ class ScreenMain(LcarsScreen):
         
         self.emf_gadget.visible = False
         self.antenna_analysis.visible = False
-        self.microscope_gadget.visible = False
         self.spectral_gadget.visible = False
         self.dashboard.visible = False
         self.topo_map.visible = False
@@ -422,8 +410,8 @@ class ScreenMain(LcarsScreen):
         self.waterfall_display.visible = False
         self.frequency_selector.visible = False
         self.spectrum_scan_display.visible = False
-        self.microscope_gadget_ref.visible = False
         self.dashboard_ref.visible = False
+        self.microscope_widget.visible = False
     
         # Reset scanning flags
         self.emf_gadget.emf_scanning = False
@@ -439,7 +427,7 @@ class ScreenMain(LcarsScreen):
         if gadget_name == 'emf':
             self.emf_gadget.visible = True
         elif gadget_name == 'microscope':
-            self.microscope_gadget.visible = True
+            self.microscope_widget.visible = True
         elif gadget_name == 'spectral':
             self.spectral_gadget.visible = True
         elif gadget_name == 'dashboard':
@@ -454,6 +442,22 @@ class ScreenMain(LcarsScreen):
     def handleEvents(self, event, fpsClock):
         if event.type == pygame.MOUSEBUTTONDOWN:
             self.beep1.play()
+            
+            # Check if click is on TextDisplay while in microscope mode
+            if self.microscope_widget.visible:
+                if self.microscope_file_list.rect.collidepoint(event.pos):
+                    # Calculate which line was clicked
+                    y_rel = event.pos[1] - self.microscope_file_list.rect.top
+                    line_height = self.microscope_file_list.font_size + 2  # Font size + spacing
+                    clicked_line = int(y_rel / line_height)
+                    
+                    lines = self.microscope_file_list.lines
+                    if 0 <= clicked_line < len(lines):
+                        line_text = lines[clicked_line]
+                        # Try to select this group (works in both live and review modes)
+                        if self.microscope_widget.select_group_by_name(line_text):
+                            self._update_microscope_display()
+                            print("Selected group from click: {}".format(line_text.strip()))
             
             # Check if click is on waterfall display
             if self.waterfall_display.visible and self.waterfall_display.rect.collidepoint(event.pos):
@@ -536,7 +540,7 @@ class ScreenMain(LcarsScreen):
             # Check if file list selection changed after click
             if self.microscope_file_list.visible and self.microscope_file_list.selected_index is not None:
                 # In microscope mode - load selected image
-                if self.microscope_gadget.visible:
+                if self.microscope_widget.visible:
                     if self.microscope_file_list.selected_index != self.micro.reviewing:
                         self.micro.reviewing = self.microscope_file_list.selected_index
                         self._loadMicroscopeImage()
@@ -564,11 +568,16 @@ class ScreenMain(LcarsScreen):
         if 0 <= self.micro.reviewing < len(sorted_files):
             review_surf = pygame.Surface((640, 480))
             review_surf.blit(pygame.image.load(sorted_files[self.micro.reviewing]), (-299, -187))
-            self.microscope_gadget.image = review_surf
+            self.microscope_widget.image = review_surf
             print("Reviewing file: {} (mtime: {})".format(
                 sorted_files[self.micro.reviewing], 
                 os.path.getmtime(sorted_files[self.micro.reviewing])
             ))
+    def _update_microscope_display(self):
+        """Update text display with microscope status and groups"""
+        # Get group browser text
+        lines = self.microscope_widget.get_group_browser_text()
+        self.microscope_file_list.set_lines(lines)
     
     def _updateDemodulationInfo(self, frequency_hz):
         """Update text display with demodulation protocol info"""
@@ -597,6 +606,12 @@ class ScreenMain(LcarsScreen):
             lines.append("  {}".format(mode['description']))
             lines.append("")  # Blank line between modes
         
+        self.microscope_file_list.set_lines(lines)
+    
+    def _update_microscope_display(self):
+        """Update text display with microscope status and groups"""
+        # Get group browser text
+        lines = self.microscope_widget.get_group_browser_text()
         self.microscope_file_list.set_lines(lines)
         
         # Set selected index to current mode
@@ -722,10 +737,15 @@ class ScreenMain(LcarsScreen):
                 print("SCAN: Current mode does not support zoom")
             return
             
-        if self.microscope_gadget.visible:
-            if not self.micro.scanning:
-                self.micro.cam.start()
-            self.micro.scanning = True
+            
+        if self.microscope_widget.visible:
+            # In review mode, switch to live view
+            if self.microscope_widget.reviewing:
+                self.microscope_widget.start_live_view()
+                self._update_microscope_display()
+                print("Microscope: Switched to live view")
+            # Already in live mode, do nothing (or could toggle off if desired)
+            return
             
         if self.spectral_gadget.visible:
             if not self.spectro.scanning:
@@ -857,10 +877,9 @@ class ScreenMain(LcarsScreen):
             return
         
         # Microscope: Save screenshot
-        if self.micro.scanning and self.microscope_gadget.visible:
-            filename = "microscope_{}.jpg".format(datetime.now().strftime("%y.%m.%d.%H.%M.%S"))
-            pygame.image.save(self.myScreen, "/home/tricorder/rpi_lcars-master/app/screenshots/" + filename)
-            print("Saved screenshot: {}".format(filename))
+        if self.microscope_widget.visible and self.microscope_widget.scanning:
+            self.microscope_widget.capture_image(self.myScreen)
+            self._update_microscope_display()
             
         # Spectral: Start analysis
         if self.spectro.scanning and self.spectral_gadget.visible:
@@ -921,6 +940,17 @@ class ScreenMain(LcarsScreen):
     def analyzeHandler(self, item, event, clock):
         """ANALYZE: Start/stop live waterfall scan OR review microscope images OR zoom out on map OR jump to waterfall from satellite"""
         
+        # Microscope: Toggle between live view and review mode
+        if self.microscope_widget.visible:
+            if self.microscope_widget.scanning:
+                # Switch from live view to review mode
+                self.microscope_widget.enter_review_mode()
+            else:
+                # Switch from review mode back to live view
+                self.microscope_widget.start_live_view()
+            self._update_microscope_display()
+            return
+        
         # Satellite Tracker: Jump to waterfall if satellite selected
         if hasattr(self, 'satellite_tracker') and self.satellite_tracker.visible:
             if self.satellite_tracker.selected_satellite:
@@ -971,37 +1001,15 @@ class ScreenMain(LcarsScreen):
             return
         
         # Microscope: Review saved images
-        if self.microscope_gadget_ref.visible:
-            self.microscope_gadget_ref.visible = False
-            self.microscope_gadget.visible = True
-            
-        if self.microscope_gadget.visible:
-            if self.micro.scanning:
-                self.micro.cam.stop()
-            self.micro.scanning = False
-            
-            files = glob.glob("/home/tricorder/rpi_lcars-master/app/screenshots/microscope_*.jpg")
-            if not files:
-                return
-                
-            sorted_files = sorted(files, key=lambda f: os.path.getmtime(f), reverse=True)
-            
-            self.microscope_file_list.visible = True
-            
-            file_display_names = []
-            for f in sorted_files:
-                mtime = os.path.getmtime(f)
-                timestamp = datetime.fromtimestamp(mtime).strftime("%m/%d %H:%M:%S")
-                file_display_names.append(timestamp)
-            
-            self.microscope_file_list.set_lines(file_display_names)
-            
-            if self.micro.reviewing >= len(files):
-                self.micro.reviewing = 0
-            self.microscope_file_list.set_selected_index(self.micro.reviewing)
-            
-            self._loadMicroscopeImage()
-            self.micro.reviewing += 1
+        if self.microscope_widget.visible:
+            if self.microscope_widget.scanning:
+                # Switch from live view to review mode
+                self.microscope_widget.enter_review_mode()
+            else:
+                # Switch from review mode back to live view
+                self.microscope_widget.start_live_view()
+            self._update_microscope_display()
+            return
             
         # EMF: Toggle live waterfall scan
         if self.emf_gadget.visible or self.frequency_selector.visible or self.waterfall_display.visible or self.spectrum_scan_display.visible:
@@ -1058,7 +1066,16 @@ class ScreenMain(LcarsScreen):
             return
         
         # Microscope navigation (go to first image)
-        self._handleMicroscopeNavigation(review_index=0)
+        if self.microscope_widget.visible:
+            # Cycle through groups (for filtering in review mode)
+            # Or cycle save group (in live mode)
+            if self.microscope_widget.scanning:
+                self.microscope_widget.cycle_save_group(-1)  # UP = previous group
+            else:
+                # Cycle through group filters
+                self._cycle_microscope_group_filter(-1)
+            self._update_microscope_display()
+            return
             
     def navHandlerDown(self, item, event, clock):
         """Navigation Down: Pan south (map) OR decrease filter width (waterfall) OR decrease sweep range (EMF)"""
@@ -1085,7 +1102,13 @@ class ScreenMain(LcarsScreen):
             return
         
         # Microscope navigation
-        self._handleMicroscopeNavigation(review_index=-1)
+        if self.microscope_widget.visible:
+            if self.microscope_widget.scanning:
+                self.microscope_widget.cycle_save_group(1)  # DOWN = next group
+            else:
+                self._cycle_microscope_group_filter(1)
+            self._update_microscope_display()
+            return
                        
     def navHandlerLeft(self, item, event, clock):
         # Map pan: Pan west
@@ -1101,10 +1124,11 @@ class ScreenMain(LcarsScreen):
             return
         
         # Microscope navigation
-        self._handleMicroscopeNavigation(increment=-1)
-        if self.emf_gadget.emf_scanning:
-            self.emf_gadget.target_frequency -= 1
-                          
+        if self.microscope_widget.visible and self.microscope_widget.reviewing:
+            self.microscope_widget.navigate_images(-1)
+            self._update_microscope_display()
+            return
+            
     def navHandlerRight(self, item, event, clock):
         # Map pan: Pan east
         if self.topo_map.visible or self.dashboard.visible or self.geological_map.visible:
@@ -1119,18 +1143,24 @@ class ScreenMain(LcarsScreen):
             return
         
         # Microscope navigation
-        self._handleMicroscopeNavigation(increment=1)
-        if self.emf_gadget.emf_scanning:
-            self.emf_gadget.target_frequency += 1
+        if self.microscope_widget.visible and self.microscope_widget.reviewing:
+            self.microscope_widget.navigate_images(1)
+            self._update_microscope_display()
+            return
+            
+    def _cycle_microscope_group_filter(self, direction):
+        """Cycle through group filters in review mode"""
+        if self.microscope_widget.reviewing:
+            self.microscope_widget.cycle_group_filter(direction) 
     
     def _handleMicroscopeNavigation(self, review_index=None, increment=None):
         """Handle microscope image navigation with file list sync"""
         
-        if self.microscope_gadget_ref.visible:
-            self.microscope_gadget_ref.visible = False
-            self.microscope_gadget.visible = True
+        if self.microscope_widget.visible:
+            self.microscope_widget.visible = False
+            self.microscope_widget.visible = True
             
-        if not self.microscope_gadget.visible:
+        if not self.microscope_widget.visible:
             return
              
         if self.micro.scanning:
@@ -1200,12 +1230,14 @@ class ScreenMain(LcarsScreen):
         """Switch to MICROSCOPE view and start scanning"""
         self._switch_to_mode('microscope')
         
-        self.microscope_file_list.clear()
+        # Start live view
+        self.microscope_widget.visible = True
+        self.microscope_widget.start_live_view()
         
-        if not self.micro.scanning:
-            self.micro.cam.start()
-        self.micro.scanning = True
-        self.micro.reviewing = 0
+        # Update text display with groups
+        self._update_microscope_display()
+        # Update text display with groups
+        self._update_microscope_display()
 
     def weatherHandler(self, item, event, clock):
         """Switch to ATMOSPHERIC satellite tracker view"""
