@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-rtl_scan_2.py - FIXED VERSION
+rtl_scan_2.py - ADAPTIVE RESOLUTION VERSION
 
-Improvements:
-1. Better DC spike removal using interpolation instead of averaging
-2. Proper overlap handling to avoid stitching artifacts
-3. Higher gain by default (4 -> 40 dB)
-4. More samples per sweep for better averaging
+Improvements over previous version:
+1. Adaptive resolution based on number of sweeps (faster wide scans)
+2. Y-axis dB scale for signal strength reference
+3. Better DC spike removal using interpolation
+4. Proper overlap handling to avoid stitching artifacts
 5. Diagnostic output
 """
 
@@ -114,9 +114,37 @@ def merge_overlapping_data(frequencies, psd_data, bin_width_hz=1000):
     return np.array(merged_freq), np.array(merged_psd)
 
 
+def get_adaptive_parameters(num_sweeps):
+    """
+    Get adaptive scan parameters based on number of sweeps
+    
+    For wide scans (many sweeps), use lower resolution for speed.
+    For narrow scans (few sweeps), use higher resolution for detail.
+    
+    Args:
+        num_sweeps: Number of sweeps to perform
+        
+    Returns:
+        (fft_size, num_rows) tuple
+    """
+    if num_sweeps <= 2:
+        # Very narrow scan: High detail (reduced from 2048/1000)
+        return (1024, 600)
+    elif num_sweeps <= 4:
+        # Narrow scan: Medium detail (reduced from 1024/800)
+        return (1024, 400)
+    elif num_sweeps <= 7:
+        # Medium scan: Balanced (reduced from 1024/500)
+        return (512, 400)
+    else:
+        # Wide scan: Fast (reduced from 512/300)
+        return (512, 250)
+
+
 def plot_progress(frequencies, psd_db, start_freq, end_freq, step_num, total_steps):
-    """Create progress spectrum plot during scanning"""
+    """Create progress spectrum plot during scanning with minimalist dB scale"""
     fig = plt.figure(figsize=(6.4, 3.36), dpi=100)
+    # Full width for data, no left margin needed
     ax = plt.axes([0, 0.08, 1, 0.92])
     
     # Styling
@@ -124,7 +152,6 @@ def plot_progress(frequencies, psd_db, start_freq, end_freq, step_num, total_ste
     ax.spines['right'].set_visible(False)
     ax.spines['left'].set_visible(False)
     ax.spines['bottom'].set_visible(False)
-    ax.set_yticks([])
     
     fig.patch.set_facecolor('black')
     ax.set_facecolor('black')
@@ -134,6 +161,37 @@ def plot_progress(frequencies, psd_db, start_freq, end_freq, step_num, total_ste
     
     # Set limits to full range
     ax.set_xlim(start_freq, end_freq)
+    
+    # Y-axis: minimalist dB scale with tick marks only
+    if len(psd_db) > 0:
+        psd_min = np.min(psd_db)
+        psd_max = np.max(psd_db)
+        
+        # Round to nice values
+        y_min = np.floor(psd_min / 10) * 10
+        y_max = np.ceil(psd_max / 10) * 10
+        
+        ax.set_ylim(y_min, y_max)
+        
+        # Draw minimalist tick marks on left edge (moved right to avoid cropping)
+        ax.tick_params(axis='y', which='both', left=False, right=False, 
+                      labelleft=False, labelright=False)
+        
+        # Manually draw tick marks at left edge, slightly offset to avoid cropping
+        freq_range = end_freq - start_freq
+        tick_start = start_freq + freq_range * 0.015  # Start 1.5% from left edge
+        tick_length = freq_range * 0.012  # Tick mark length
+        
+        for y_val in [y_min, y_max]:
+            ax.plot([tick_start, tick_start + tick_length], [y_val, y_val], 
+                   color='yellow', linewidth=1.5)
+        
+        # Add top and bottom dB labels, positioned after tick marks
+        label_x = tick_start + tick_length * 1.5
+        ax.text(label_x, y_max, '{:.0f}dB'.format(y_max),
+               color='yellow', fontsize=8, verticalalignment='center')
+        ax.text(label_x, y_min, '{:.0f}dB'.format(y_min),
+               color='yellow', fontsize=8, verticalalignment='center')
     
     # X-axis labels
     ax.tick_params(axis='x', colors='yellow', labelsize=9)
@@ -157,6 +215,7 @@ def plot_progress(frequencies, psd_db, start_freq, end_freq, step_num, total_ste
 def scan_frequency_range(start_freq, end_freq, sample_rate=2.4e6, gain=40, show_progress=True):
     """
     Scan a frequency range and return stitched spectrum
+    Uses adaptive resolution based on scan width.
     
     Args:
         start_freq: Start frequency (Hz)
@@ -177,7 +236,7 @@ def scan_frequency_range(start_freq, end_freq, sample_rate=2.4e6, gain=40, show_
                 pass
     
     print("="*60)
-    print("RTL-SDR Frequency Scanner - FIXED VERSION")
+    print("RTL-SDR Frequency Scanner - ADAPTIVE RESOLUTION VERSION")
     print("="*60)
     print("Frequency range: {:.1f} - {:.1f} MHz".format(start_freq/1e6, end_freq/1e6))
     print("Sample rate: {:.1f} MHz".format(sample_rate/1e6))
@@ -198,16 +257,20 @@ def scan_frequency_range(start_freq, end_freq, sample_rate=2.4e6, gain=40, show_
     step_size = int(sample_rate * (1 - overlap))
     num_steps = int(np.ceil((end_freq - start_freq) / step_size))
     
+    # Get adaptive parameters based on number of sweeps
+    fft_size, num_rows = get_adaptive_parameters(num_steps)
+    
     print("Sweep steps: {}".format(num_steps))
     print("Overlap: {}%".format(overlap*100))
+    print("Resolution mode: FFT={}, Rows={}".format(fft_size, num_rows))
+    if num_steps > 7:
+        print("  (Using lower resolution for faster wide scan)")
+    elif num_steps <= 2:
+        print("  (Using maximum resolution for detailed narrow scan)")
     print()
     
     all_frequencies = []
     all_psd_data = []
-    
-    # Use more samples per step for better averaging
-    fft_size = 2048  # Increased from 512
-    num_rows = 1000  # Increased from 500
     
     for step_num in range(num_steps):
         # Calculate center frequency for this step
@@ -231,8 +294,8 @@ def scan_frequency_range(start_freq, end_freq, sample_rate=2.4e6, gain=40, show_
         # Compute PSD using Welch's method
         frequencies, psd = signal.welch(samples, fs=sample_rate, 
                                        nperseg=fft_size,
-                                       window='hanning',  # Hanning better than boxcar
-                                       noverlap=fft_size//2)  # 50% overlap
+                                       window='hanning',
+                                       noverlap=fft_size//2)
         
         # Shift to center
         frequencies = np.fft.fftshift(frequencies)
@@ -325,9 +388,10 @@ def scan_frequency_range(start_freq, end_freq, sample_rate=2.4e6, gain=40, show_
 
 
 def plot_spectrum(frequencies, psd_db, start_freq, end_freq, output_file='/tmp/spectrum.png'):
-    """Create spectrum plot"""
+    """Create spectrum plot with minimalist dB scale"""
     # Create figure
     fig = plt.figure(figsize=(6.4, 3.36), dpi=100)
+    # Full width for data, no left margin needed
     ax = plt.axes([0, 0.08, 1, 0.92])
     
     # Styling
@@ -335,7 +399,6 @@ def plot_spectrum(frequencies, psd_db, start_freq, end_freq, output_file='/tmp/s
     ax.spines['right'].set_visible(False)
     ax.spines['left'].set_visible(False)
     ax.spines['bottom'].set_visible(False)
-    ax.set_yticks([])
     
     fig.patch.set_facecolor('black')
     ax.set_facecolor('black')
@@ -343,8 +406,39 @@ def plot_spectrum(frequencies, psd_db, start_freq, end_freq, output_file='/tmp/s
     # Plot spectrum
     ax.plot(frequencies, psd_db, color="yellow", linewidth=2)
     
-    # Set limits
+    # Set X limits
     ax.set_xlim(start_freq, end_freq)
+    
+    # Y-axis: minimalist dB scale with tick marks only
+    if len(psd_db) > 0:
+        psd_min = np.min(psd_db)
+        psd_max = np.max(psd_db)
+        
+        # Round to nice values
+        y_min = np.floor(psd_min / 10) * 10
+        y_max = np.ceil(psd_max / 10) * 10
+        
+        ax.set_ylim(y_min, y_max)
+        
+        # Draw minimalist tick marks on left edge (moved right to avoid cropping)
+        ax.tick_params(axis='y', which='both', left=False, right=False, 
+                      labelleft=False, labelright=False)
+        
+        # Manually draw tick marks at left edge, slightly offset to avoid cropping
+        freq_range = end_freq - start_freq
+        tick_start = start_freq + freq_range * 0.015  # Start 1.5% from left edge
+        tick_length = freq_range * 0.012  # Tick mark length
+        
+        for y_val in [y_min, y_max]:
+            ax.plot([tick_start, tick_start + tick_length], [y_val, y_val], 
+                   color='yellow', linewidth=1.5)
+        
+        # Add top and bottom dB labels, positioned after tick marks
+        label_x = tick_start + tick_length * 1.5
+        ax.text(label_x, y_max, '{:.0f}dB'.format(y_max),
+               color='yellow', fontsize=8, verticalalignment='center')
+        ax.text(label_x, y_min, '{:.0f}dB'.format(y_min),
+               color='yellow', fontsize=8, verticalalignment='center')
     
     # X-axis labels
     ax.tick_params(axis='x', colors='yellow', labelsize=9)
@@ -365,6 +459,11 @@ def main():
         print("Usage: python rtl_scan_2.py <start_freq> <end_freq> [gain] [show_progress]")
         print("Example: python rtl_scan_2.py 88e6 108e6 40 1")
         print("  show_progress: 1=show progress images (default), 0=final only")
+        print("\nAdaptive Resolution:")
+        print("  1-2 sweeps: High detail (1024 FFT, 600 rows)")
+        print("  3-4 sweeps: Medium (1024 FFT, 400 rows)")
+        print("  5-7 sweeps: Balanced (512 FFT, 400 rows)")
+        print("  8+ sweeps:  Fast (512 FFT, 250 rows)")
         sys.exit(1)
     
     start_freq = int(float(sys.argv[1]))
