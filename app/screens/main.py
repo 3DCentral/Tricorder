@@ -94,13 +94,13 @@ class ScreenMain(LcarsScreen):
         self.current_geospatial_mode = 0  # Index into geospatial_modes
         self.topo_pan_speed = 100  # Topographical map pan speed
 
-        # OLD dashboard (static images) - keeping for fallback
+        # Static dashboard fallback
         self.dashboard = LcarsImage("assets/geo.png", (187, 299))
         self.dashboard_ref = LcarsImage("assets/geo_ref.png", (187, 299))
         all_sprites.add(self.dashboard, layer=2)
         all_sprites.add(self.dashboard_ref, layer=2)
 
-        # NEW: Topographical map widget for Geospatial mode
+        # Topographical map widget (lazy-loaded on first activation)
         # DON'T load DEM on startup - only when mode is activated (lazy loading)
         self.topo_map = LcarsTopoMap((187, 299), (640, 480), dem_file_path=None)
         all_sprites.add(self.topo_map, layer=2)
@@ -108,7 +108,7 @@ class ScreenMain(LcarsScreen):
         # Link topo_map to geospatial modes
         self.geospatial_modes[0]['widget'] = self.topo_map
         
-        # NEW: Geological map widget for Geospatial mode
+        # Geological map widget (lazy-loaded on first activation)
         # DON'T load GeoJSON on startup - only when mode is activated (lazy loading)
         self.geological_map = LcarsGeologicalMap((187, 299), (640, 480), geojson_file=None)
         all_sprites.add(self.geological_map, layer=2)
@@ -255,8 +255,6 @@ class ScreenMain(LcarsScreen):
                     print("Scan process completed with code: {}".format(poll_result))
                     self.emf.scanning = False
                     self.emf_gadget.emf_scanning = False
-                    # FIX #2: Keep scanning range visible after completion!
-                    # (removed self.frequency_selector.clear_scanning_range())
                     try:
                         loaded_image = pygame.image.load("/tmp/spectrum.png")
                         scaled_image = pygame.transform.scale(loaded_image, self.scan_display_size)
@@ -279,8 +277,7 @@ class ScreenMain(LcarsScreen):
                         progress_files = glob.glob("/tmp/spectrum_progress_*.png")
                         
                         if progress_files:
-                            # FIX: Sort by filename (numerically) to get the latest progress file
-                            # spectrum_progress_0001.png, spectrum_progress_0002.png, etc.
+                            # Sort by filename to get latest (spectrum_progress_0001.png, etc.)
                             sorted_files = sorted(progress_files)
                             latest_file = sorted_files[-1]  # Get the last (highest numbered) file
                             
@@ -404,8 +401,8 @@ class ScreenMain(LcarsScreen):
         self.spectral_gadget.visible = False
         self.dashboard.visible = False
         self.topo_map.visible = False
-        self.geological_map.visible = False  # NEW: Hide geological map
-        self.satellite_tracker.visible = False  # ADD THIS LINE
+        self.geological_map.visible = False
+        self.satellite_tracker.visible = False
         self.weather.visible = False
         self.waterfall_display.visible = False
         self.frequency_selector.visible = False
@@ -477,7 +474,7 @@ class ScreenMain(LcarsScreen):
                 if self.spectrum_scan_display.selected_frequency:
                     self._updateDemodulationInfo(self.spectrum_scan_display.selected_frequency)
                     
-                    # FIX #1 PART B: Calculate and display scan range for new target
+                    # Update scan range preview for newly selected frequency
                     target_freq = self.spectrum_scan_display.selected_frequency
                     bandwidth = 10e6  # 10 MHz bandwidth
                     
@@ -508,7 +505,7 @@ class ScreenMain(LcarsScreen):
                 if hasattr(self.frequency_selector, 'selected_frequency') and self.frequency_selector.selected_frequency:
                     self._updateDemodulationInfo(self.frequency_selector.selected_frequency)
                     
-                    # FIX #1: PREDICTIVE SCAN WIDTH - Show what WILL be scanned
+                    # Update scan range preview for selected frequency
                     target_freq = self.frequency_selector.selected_frequency
                     bandwidth = 10e6  # 10 MHz scan width (same as in scanHandler)
                     
@@ -532,23 +529,12 @@ class ScreenMain(LcarsScreen):
                         end_freq / 1e6
                     ))
             
-            # Check if click is on microscope file list
-            if self.microscope_file_list.visible and self.microscope_file_list.rect.collidepoint(event.pos):
-                pass
-
+            
         if event.type == pygame.MOUSEBUTTONUP:
             # Check if file list selection changed after click
             if self.microscope_file_list.visible and self.microscope_file_list.selected_index is not None:
-                # In microscope mode - load selected image
-                if self.microscope_widget.visible:
-                    if self.microscope_file_list.selected_index != self.micro.reviewing:
-                        self.micro.reviewing = self.microscope_file_list.selected_index
-                        self._loadMicroscopeImage()
-                
                 # In geospatial mode - switch map mode
-                elif self.topo_map.visible or self.dashboard.visible or self.geological_map.visible:
-                    # Calculate which mode was clicked
-                    # Mode menu format: "GEOSPATIAL MODES", "", then 3 lines per mode
+                if self.topo_map.visible or self.dashboard.visible or self.geological_map.visible:
                     selected_line = self.microscope_file_list.selected_index
                     if selected_line >= 2:  # Skip header lines
                         # Each mode takes 3 lines (name, description, blank)
@@ -557,22 +543,6 @@ class ScreenMain(LcarsScreen):
                             self._switch_geospatial_mode(mode_index)
             return False
             
-    def _loadMicroscopeImage(self):
-        """Load and display the currently selected microscope image"""
-        files = glob.glob("/home/tricorder/rpi_lcars-master/app/screenshots/microscope_*.jpg")
-        if not files:
-            return
-        
-        sorted_files = sorted(files, key=lambda f: os.path.getmtime(f), reverse=True)
-        
-        if 0 <= self.micro.reviewing < len(sorted_files):
-            review_surf = pygame.Surface((640, 480))
-            review_surf.blit(pygame.image.load(sorted_files[self.micro.reviewing]), (-299, -187))
-            self.microscope_widget.image = review_surf
-            print("Reviewing file: {} (mtime: {})".format(
-                sorted_files[self.micro.reviewing], 
-                os.path.getmtime(sorted_files[self.micro.reviewing])
-            ))
     def _update_microscope_display(self):
         """Update text display with microscope status and groups"""
         # Get group browser text
@@ -659,11 +629,9 @@ class ScreenMain(LcarsScreen):
                 print("Loading topographical data...")
                 self.topo_map.load_dem(self.dem_file_path)
                 
-                # NEW: Set initial center to target coordinates
-                # 37°31'45.2"N 77°27'11.4"W = 37.52922°N, 77.45317°W
+                # Set initial center to target coordinates (37°31'45.2"N 77°27'11.4"W)
                 if hasattr(self.topo_map, 'set_view_from_center'):
-                    self.topo_map.set_view_from_center(37.52922, -77.45317, 6)  # zoom index 5 = 1.0x
-                    print("Centered topo map on target coordinates: 37.52922°N, 77.45317°W")
+                    self.topo_map.set_view_from_center(37.52922, -77.45317, 6)
                     
         # Load Geological data if needed
         elif mode_index == 1 and self.geological_map.gdf is None:
@@ -792,15 +760,12 @@ class ScreenMain(LcarsScreen):
                 print("Select a target frequency on the scale above")
                 return
             
-            # REMOVED: The "deactivate scan" block that required an extra SCAN press
-            # Now users can select a new frequency and scan immediately!
-            
             if self.emf_gadget.visible:
                 self.emf_gadget.visible = False
                 self.frequency_selector.visible = True
                 self.spectrum_scan_display.visible = False
                 
-                # FIX #4: If we have a previous scan range, show it
+                # Restore previous scan range if available
                 if self.current_scan_start_freq and self.current_scan_end_freq:
                     self.frequency_selector.set_scanning_range(
                         self.current_scan_start_freq,
@@ -1150,48 +1115,10 @@ class ScreenMain(LcarsScreen):
             
     def _cycle_microscope_group_filter(self, direction):
         """Cycle through group filters in review mode"""
-        if self.microscope_widget.reviewing:
-            self.microscope_widget.cycle_group_filter(direction) 
+        self.microscope_widget.cycle_group_filter(direction)
     
-    def _handleMicroscopeNavigation(self, review_index=None, increment=None):
-        """Handle microscope image navigation with file list sync"""
-        
-        if self.microscope_widget.visible:
-            self.microscope_widget.visible = False
-            self.microscope_widget.visible = True
-            
-        if not self.microscope_widget.visible:
-            return
-             
-        if self.micro.scanning:
-            self.micro.cam.stop()
-        self.micro.scanning = False
-        
-        files = glob.glob("/home/tricorder/rpi_lcars-master/app/screenshots/microscope_*.jpg")
-        if not files:
-            return
-            
-        sorted_files = sorted(files, key=lambda f: os.path.getmtime(f), reverse=True)
-        
-        if review_index is not None:
-            if review_index == -1:
-                self.micro.reviewing = len(files) - 1
-            else:
-                self.micro.reviewing = review_index
-        elif increment is not None:
-            self.micro.reviewing += increment
-            if self.micro.reviewing >= len(files):
-                self.micro.reviewing = 0
-            elif self.micro.reviewing < 0:
-                self.micro.reviewing = len(files) - 1
-        
-        if self.microscope_file_list.visible:
-            self.microscope_file_list.set_selected_index(self.micro.reviewing)
-        
-        self._loadMicroscopeImage()
-            
     def gaugesHandler(self, item, event, clock):
-        """Switch to GEOSPATIAL mode (now with topo map!)"""
+        """Switch to GEOSPATIAL mode"""
         self._switch_to_mode('dashboard')
         
         # Lazy load DEM data if not already loaded
@@ -1217,11 +1144,9 @@ class ScreenMain(LcarsScreen):
             # Load the DEM (this is the slow part)
             self.topo_map.load_dem(self.dem_file_path)
 
-            # NEW: Set initial center to target coordinates
-            # 37°31'45.2"N 77°27'11.4"W = 37.52922°N, 77.45317°W
+            # Set initial center to target coordinates (37°31'45.2"N 77°27'11.4"W)
             if hasattr(self.topo_map, 'set_view_from_center'):
-                self.topo_map.set_view_from_center(37.52922, -77.45317, 6)  # zoom index 5 = 1.0x
-                print("Centered topo map on target coordinates: 37.52922°N, 77.45317°W")
+                self.topo_map.set_view_from_center(37.52922, -77.45317, 6)
         
         # Set up map mode selection menu
         self._update_geospatial_mode_menu()
@@ -1257,7 +1182,7 @@ class ScreenMain(LcarsScreen):
         self.frequency_selector.visible = False
         self.spectrum_scan_display.visible = False
         
-        # Show antenna analysis widget instead of static emf_gadget
+        # Show antenna analysis and auto-start scan
         self.emf_gadget.visible = False
         self.antenna_analysis.visible = True
         
