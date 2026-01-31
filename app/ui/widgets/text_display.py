@@ -15,7 +15,7 @@ class LcarsTextDisplay(LcarsWidget):
     - Customizable colors and font size
     """
     
-    def __init__(self, pos, size=(640, 480), font_size=16, bg_color=(0, 0, 0)):
+    def __init__(self, pos, size=(640, 480), font_size=20, bg_color=(0, 0, 0)):
         """
         Initialize text display
         
