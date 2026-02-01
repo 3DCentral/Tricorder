@@ -252,8 +252,12 @@ def scan_frequency_range(start_freq, end_freq, sample_rate=2.4e6, gain=40, show_
     # Discard initial samples
     _ = sdr.read_samples(2048)
     
-    # Calculate sweep parameters with 10% overlap to reduce stitching artifacts
-    overlap = 0.1
+    # Calculate sweep parameters.
+    # 25% overlap: each segment's outer ~10% of bins are trimmed (see below)
+    # so we need enough overlap that the trimmed segments still tile fully.
+    # 10% trim each side = 20% of bandwidth removed; 25% overlap covers that
+    # with margin for clean blending.
+    overlap = 0.25
     step_size = int(sample_rate * (1 - overlap))
     num_steps = int(np.ceil((end_freq - start_freq) / step_size))
     
@@ -294,7 +298,7 @@ def scan_frequency_range(start_freq, end_freq, sample_rate=2.4e6, gain=40, show_
         # Compute PSD using Welch's method
         frequencies, psd = signal.welch(samples, fs=sample_rate, 
                                        nperseg=fft_size,
-                                       window='hanning',
+                                       window='hann',
                                        noverlap=fft_size//2)
         
         # Shift to center
@@ -306,6 +310,17 @@ def scan_frequency_range(start_freq, end_freq, sample_rate=2.4e6, gain=40, show_
         
         # Remove DC spike using interpolation
         psd = remove_dc_spike(frequencies, psd, center_freq)
+        
+        # Trim the outer 10% of bins on each side.  The Hann window used by
+        # Welch attenuates the band edges, and the RTL-SDR's analog front-end
+        # adds its own rolloff on top (worse at higher frequencies).  These
+        # edge bins are systematically lower than the true spectrum; keeping
+        # them poisons the overlap-zone average and produces the per-segment
+        # "hump" artifact.  The 25% inter-segment overlap ensures full
+        # coverage after trimming.
+        trim_bins = len(frequencies) // 10  # 10% each side
+        frequencies = frequencies[trim_bins:-trim_bins]
+        psd = psd[trim_bins:-trim_bins]
         
         # Check signal quality
         psd_db = 10 * np.log10(psd + 1e-10)
