@@ -12,6 +12,22 @@ SOLUTION:
 - Track ALL processes in a central registry
 - Kill processes with SIGTERM then SIGKILL if needed
 - Cleanup on mode switches and logout
+
+PIPE DEADLOCK FIX (2026-01-31):
+- stdout=PIPE / stderr=PIPE with no reader causes a kernel pipe-buffer
+  deadlock.  The subprocess blocks on write() once the 64 KB buffer fills.
+  For the demodulator (rtl_fm + play) this takes ~134 seconds of status
+  output — matching the observed ~2 min 15 sec timeout exactly.
+  For the waterfall (rtl_scan_live.py) the buffer fills faster because
+  it prints every frame, which is why a restarted waterfall "ticks once"
+  and dies: the OLD process is still alive (blocked), still holding the
+  SDR device, so the new process can't open it.
+- None of the SDR subprocesses in this project have their stdout/stderr
+  read by the parent.  The waterfall communicates via /tmp/*.npy files,
+  the spectrum scanner via /tmp/spectrum*.png, and the demodulator is
+  fire-and-forget (audio goes directly to ALSA via sox play).
+- Fix: silently replace PIPE with DEVNULL in start_process() so output
+  is discarded at the fd level and no buffer ever fills.
 """
 
 import subprocess
@@ -42,6 +58,16 @@ class ProcessManager:
         """
         # Kill any existing process with this name first
         self.kill_process(name)
+        
+        # PIPE DEADLOCK PREVENTION:
+        # If the caller passed stdout=PIPE or stderr=PIPE but nothing in this
+        # codebase ever reads those pipes, the subprocess will block on write()
+        # once the kernel's 64 KB pipe buffer fills.  Replace silently with
+        # DEVNULL so output is discarded at the fd level.
+        if popen_kwargs.get('stdout') == subprocess.PIPE:
+            popen_kwargs['stdout'] = subprocess.DEVNULL
+        if popen_kwargs.get('stderr') in (subprocess.PIPE, subprocess.STDOUT):
+            popen_kwargs['stderr'] = subprocess.DEVNULL
         
         # Start new process
         if isinstance(command, str):

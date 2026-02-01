@@ -337,7 +337,9 @@ class LcarsDemodulator(LcarsWidget):
         ])
         
         # Build full command
-        cmd = ' '.join(cmd_parts) + ' 2>&1'  # Capture stderr too
+        # Note: ProcessManager discards stdout/stderr via DEVNULL so no
+        # pipe-buffer deadlock can occur.  No shell-level redirect needed.
+        cmd = ' '.join(cmd_parts)
         
         print("  Full command: {}".format(cmd))
         
@@ -345,9 +347,7 @@ class LcarsDemodulator(LcarsWidget):
             # Start demodulation process
             self.fm_process = self.process_manager.start_process(
                 'demodulator',
-                ['bash', '-c', cmd],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT
+                ['bash', '-c', cmd]
             )
             
             self.tuned_in = True
@@ -361,23 +361,42 @@ class LcarsDemodulator(LcarsWidget):
             self.fm_process = None
     
     def stop_demodulation(self):
-        """Stop FM demodulation"""
+        """Stop FM demodulation and always reset state"""
         if self.tuned_in:
             self.process_manager.kill_process('demodulator')
-            self.fm_process = None
         
+        # Always clear state unconditionally — if kill_process failed or
+        # the process was already dead, we still need to reset so the next
+        # RECORD press takes the start path.
+        self.fm_process = None
         self.tuned_in = False
         self.current_frequency = None
         self.current_bandwidth = None
     
     def is_active(self):
         """
-        Check if demodulation is currently running
+        Check if demodulation is currently running.
+        
+        Polls the actual process so that a crashed or hung rtl_fm is
+        detected immediately rather than leaving tuned_in stuck at True.
         
         Returns:
             bool: True if demodulation is active, False otherwise
         """
-        return self.tuned_in
+        if not self.tuned_in:
+            return False
+        
+        # If the process exited on its own, clean up immediately
+        if self.fm_process is not None and self.fm_process.poll() is not None:
+            print("Demodulator: rtl_fm exited unexpectedly (code: {})".format(
+                self.fm_process.poll()))
+            self.fm_process = None
+            self.tuned_in = False
+            self.current_frequency = None
+            self.current_bandwidth = None
+            return False
+        
+        return True
     
     def get_current_frequency(self):
         """
