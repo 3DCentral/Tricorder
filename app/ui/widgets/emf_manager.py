@@ -18,7 +18,8 @@ class LcarsEMFManager:
 
     def __init__(self, emf_button, emf_gadget, antenna_analysis,
                  waterfall_display, frequency_selector, spectrum_scan_display,
-                 demodulator, process_manager, text_display_callback):
+                 demodulator, process_manager, text_display_callback,
+                 text_display=None):
         """
         Args:
             emf_button: The LcarsEMF sidebar button (has .scanning flag)
@@ -30,6 +31,7 @@ class LcarsEMFManager:
             demodulator: LcarsDemodulator widget
             process_manager: Shared ProcessManager instance
             text_display_callback: Function(lines) to update the side text display
+            text_display: The LcarsTextDisplay widget itself (for set_selected_index)
         """
         # Widget references
         self.emf_button = emf_button
@@ -41,6 +43,7 @@ class LcarsEMFManager:
         self.demodulator = demodulator
         self.process_manager = process_manager
         self._set_text = text_display_callback
+        self._text_display = text_display
 
         # Scan display dimensions
         self.scan_display_size = (640, 336)
@@ -49,6 +52,7 @@ class LcarsEMFManager:
         self.antenna_scan_active = False
         self.antenna_scan_process = None
         self._last_antenna_check = 0
+        self.targeted_scan = False  # True when running a high-density band-specific scan
 
         # Spectrum scan state
         self._last_spectrum_check = 0
@@ -85,6 +89,10 @@ class LcarsEMFManager:
         if not self.antenna_scan_active:
             print("Starting antenna characterization scan...")
             self.antenna_scan_active = True
+            self.targeted_scan = False  # This is a wide scan
+            
+            # Clear any previous scan data to ensure clean state
+            self.antenna_analysis.clear()
             self.antenna_analysis.start_scan()
 
             # Clear stale data files from previous run
@@ -102,10 +110,23 @@ class LcarsEMFManager:
             )
             print("Antenna scan started - ~10 seconds")
 
-        self._set_text(self.demodulator.get_demodulation_info(None, None))
+        # Push band list if scan already finished (re-entering EMF mode),
+        # otherwise show demod placeholder until the scan completes and
+        # _poll_antenna_scan replaces it.
+        if self.antenna_analysis.scan_complete:
+            self._push_band_list()
+        else:
+            self._set_text(self.demodulator.get_demodulation_info(None, None))
 
     def hide(self):
         """Hide all EMF widgets. Called when switching away from EMF mode."""
+        # Stop any running subprocesses before hiding — otherwise the SDR
+        # device stays locked by a waterfall or demodulator process.
+        if self.waterfall_display.scan_active:
+            self.waterfall_display.stop_scan()
+        if self.demodulator.is_active():
+            self.demodulator.stop_demodulation()
+
         self.emf_gadget.visible = False
         self.antenna_analysis.visible = False
         self.waterfall_display.visible = False
@@ -130,6 +151,16 @@ class LcarsEMFManager:
 
         # Waterfall visible → back to frequency selector
         if self.waterfall_display.visible:
+            # Clean up any live subprocess before hiding — otherwise the SDR
+            # device stays locked and the next ANALYZE can't restart it.
+            if self.waterfall_display.scan_active:
+                self.waterfall_display.stop_scan()
+            # Same for the demodulator: after the SCAN→ANALYZE→RECORD flow the
+            # demod holds the SDR; if the user hits SCAN without toggling
+            # ANALYZE off first we need to release it here.
+            if self.demodulator.is_active():
+                self.demodulator.stop_demodulation()
+
             self.waterfall_display.visible = False
             self.frequency_selector.visible = True
             if self.spectrum_scan_display.scan_complete:
@@ -181,6 +212,62 @@ class LcarsEMFManager:
         if not self.is_active():
             return False
 
+        # --- Antenna characterization: targeted deep sweep -------------------
+        # This must come first.  When antenna_analysis is visible the rest of
+        # this method (waterfall logic) is irrelevant and would bail on
+        # "no selected frequency" anyway.
+        if self.antenna_analysis.visible:
+            if not self.antenna_analysis.scan_complete:
+                print("Antenna scan still in progress — wait for it to finish")
+                return True
+
+            band = self.antenna_analysis.get_selected_band()
+            if band is None:
+                print("Select a band of interest first (tap on the graph or the list)")
+                return True
+
+            # Band is selected and scan is complete — launch targeted high-density sweep
+            start_freq_hz = int(band['start'] * 1e6)
+            end_freq_hz   = int(band['end']   * 1e6)
+            
+            # For narrow bands (< 10 MHz) use very high density; wider bands scale down
+            bandwidth_mhz = band['end'] - band['start']
+            if bandwidth_mhz <= 4:
+                num_points = 200   # 2m ham (4 MHz) → 200 points = 0.02 MHz spacing
+            elif bandwidth_mhz <= 10:
+                num_points = 150
+            elif bandwidth_mhz <= 30:
+                num_points = 100
+            else:
+                num_points = 80    # 70cm (30 MHz) → 80 points
+            
+            print("Launching targeted sweep:")
+            print("  Band: {}".format(band['name']))
+            print("  Range: {:.3f} - {:.3f} MHz".format(band['start'], band['end']))
+            print("  Points: {} (high density)".format(num_points))
+            
+            # Use separate output files so the wide scan isn't clobbered
+            self.antenna_scan_process = self.process_manager.start_process(
+                'antenna_scanner_targeted',
+                ['python3', '/home/tricorder/rpi_lcars-master/rtl_antenna_scan.py',
+                 '40',
+                 '--freq-min', str(start_freq_hz),
+                 '--freq-max', str(end_freq_hz),
+                 '--num-points', str(num_points),
+                 '--output-prefix', '/tmp/antenna_scan_targeted'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            self.antenna_scan_active = True
+            self.targeted_scan = True
+            
+            # Enter targeted mode so the graph zooms to the band
+            self.antenna_analysis.start_targeted_scan()
+            
+            print("Targeted scan started - will take ~{} seconds".format(num_points * 0.2))
+            return True
+
+        # --- Everything below here is the existing waterfall / demod path ----
         target_freq = self._get_selected_frequency()
         if target_freq is None:
             print("Please select a target frequency first")
@@ -291,6 +378,15 @@ class LcarsEMFManager:
                 self._update_demod_info(target_freq)
             return True
 
+        # Antenna analysis click → band selection (only after scan is complete)
+        if self.antenna_analysis.visible and self.antenna_analysis.scan_complete:
+            if self.antenna_analysis.rect.collidepoint(event.pos):
+                if self.antenna_analysis.handle_graph_click(*event.pos):
+                    # Selection changed — refresh the TextDisplay highlight
+                    # to stay in sync with whatever the graph just toggled.
+                    self._sync_text_display_selection()
+                return True   # click was inside the widget; consume it either way
+
         return False
 
     def handle_nav_up(self):
@@ -352,51 +448,104 @@ class LcarsEMFManager:
     # ---------------------------------------------------------------
     # Private: per-frame polling
     # ---------------------------------------------------------------
-
+    
     def _poll_antenna_scan(self):
         """Poll antenna scan subprocess and feed live data to the widget."""
-        if not self.antenna_analysis.visible or not self.antenna_scan_active:
+        if not self.antenna_analysis.visible:
+            return
+        if not self.antenna_scan_active:
             return
 
         current_time = pygame.time.get_ticks()
 
-        # Check if subprocess finished
+        # --- Check if subprocess finished ------------------------------------
         if self.antenna_scan_process:
             poll_result = self.antenna_scan_process.poll()
             if poll_result is not None:
                 print("Antenna scan completed with code: {}".format(poll_result))
                 self.antenna_scan_active = False
+                scan_was_targeted = self.targeted_scan  # Save for later checks
+                
+                # CRITICAL: Load final data BEFORE resetting targeted_scan flag
+                # so _load_antenna_progress uses the correct file prefix
+                self._load_antenna_progress()
+                
+                # NOW we can reset the flag for the next scan
+                self.targeted_scan = False
+
+                # Load resonances (written by the scanner after analysis)
+                prefix = "/tmp/antenna_scan_targeted" if scan_was_targeted else "/tmp/antenna_scan"
+                try:
+                    res_file = prefix + "_resonances.npy"
+                    if os.path.exists(res_file):
+                        resonances = np.load(res_file, allow_pickle=False)
+                        self.antenna_analysis.set_resonances(resonances)
+                        print("Loaded {} resonance(s)".format(len(resonances)))
+                    else:
+                        self.antenna_analysis.set_resonances(np.array([]))
+                except (IOError, OSError, ValueError) as e:
+                    print("Could not load resonances: {}".format(e))
+                    self.antenna_analysis.set_resonances(np.array([]))
+
                 self.antenna_analysis.complete_scan()
 
+                # Scan is done — replace the demod placeholder in the TextDisplay
+                # with the list of known bands that the user can now select.
+                if not scan_was_targeted:
+                    # Only show band list after wide scan completes
+                    self._push_band_list()
+
+                # Log metadata
                 try:
-                    metadata_file = "/tmp/antenna_scan_metadata.json"
+                    metadata_file = prefix + "_metadata.json"
                     if os.path.exists(metadata_file):
                         with open(metadata_file, 'r') as f:
                             metadata = json.load(f)
-                        print("Antenna scan complete: {} points measured".format(
-                            metadata.get('num_points', 0)))
+                        print("Antenna scan complete: {} points, {} resonances".format(
+                            metadata.get('num_points', 0),
+                            metadata.get('num_resonances', 0)))
                 except (IOError, OSError, json.JSONDecodeError):
                     pass
+                return
 
-        # Poll progress data every 200ms
+        # --- Poll progress data every 200 ms ---------------------------------
         if current_time - self._last_antenna_check > 200:
             self._last_antenna_check = current_time
-            try:
-                frequencies = np.load("/tmp/antenna_scan_frequencies.npy", allow_pickle=True)
-                sensitivities = np.load("/tmp/antenna_scan_sensitivities_normalized.npy", allow_pickle=True)
-                noise_floors = np.load("/tmp/antenna_scan_noise_floors.npy", allow_pickle=True)
+            self._load_antenna_progress()
 
-                # Skip if empty or mismatched (data still being written)
-                if (len(frequencies) == 0 or len(sensitivities) == 0 or len(noise_floors) == 0 or
-                        len(frequencies) != len(sensitivities) or len(frequencies) != len(noise_floors)):
-                    return
+    def _load_antenna_progress(self):
+        """Load the latest frequency + noise_floor arrays and push to widget."""
+        # Use different file paths for wide vs targeted scans
+        prefix = "/tmp/antenna_scan_targeted" if self.targeted_scan else "/tmp/antenna_scan"
+        
+        try:
+            frequencies   = np.load(prefix + "_frequencies.npy",    allow_pickle=False)
+            noise_floors  = np.load(prefix + "_noise_floors.npy",   allow_pickle=False)
 
-                self.antenna_analysis.clear()
-                for freq, sens, nf in zip(frequencies, sensitivities, noise_floors):
-                    self.antenna_analysis.add_data_point(freq, sens, nf)
+            # Guard against partially-written files (lengths must match)
+            if len(frequencies) == 0 or len(frequencies) != len(noise_floors):
+                return
 
-            except (IOError, OSError, FileNotFoundError, ValueError):
-                pass
+            # Only redraw if we actually have new points
+            if len(frequencies) == len(self.antenna_analysis.frequencies):
+                return
+
+            # CRITICAL: Preserve targeted_mode flag during live updates
+            was_targeted = self.antenna_analysis.targeted_mode
+            
+            self.antenna_analysis.clear()
+            
+            # Restore targeted_mode and start appropriate scan type
+            if was_targeted or self.targeted_scan:
+                self.antenna_analysis.start_targeted_scan()
+            else:
+                self.antenna_analysis.start_scan()
+                
+            for freq, nf in zip(frequencies, noise_floors):
+                self.antenna_analysis.add_data_point(float(freq), float(nf))
+
+        except (IOError, OSError, FileNotFoundError, ValueError):
+            pass
 
     def _poll_spectrum_scan(self, screen):
         """Poll spectrum scan subprocess, update display, draw animation."""
@@ -465,6 +614,47 @@ class LcarsEMFManager:
                 self.waterfall_display.set_data(waterfall_data, psd_data, frequencies)
             except (IOError, OSError):
                 pass
+
+    # ---------------------------------------------------------------
+    # Band-selection bridge (antenna characterization ↔ TextDisplay)
+    # ---------------------------------------------------------------
+
+    def handle_text_display_selection(self, selected_index):
+        """Relay a TextDisplay line-click into a band selection on the graph.
+
+        Called by main.py when the user clicks a line in the TextDisplay while
+        antenna_analysis is visible and scan_complete.  The TextDisplay content
+        is a 1:1 list of known_band names, so selected_index maps directly to
+        the band index.  If it's out of range we just deselect.
+        """
+        if not self.antenna_analysis.scan_complete:
+            return
+
+        band_names = self.antenna_analysis.get_known_band_names()
+        if 0 <= selected_index < len(band_names):
+            # Toggle: if the user taps the already-selected line, deselect.
+            if self.antenna_analysis.selected_band == selected_index:
+                self.antenna_analysis.set_selected_band(None)
+            else:
+                self.antenna_analysis.set_selected_band(selected_index)
+        else:
+            self.antenna_analysis.set_selected_band(None)
+
+    def _push_band_list(self):
+        """Write the known-band names into the TextDisplay.
+
+        The list is intentionally flat (one name per line, index-for-index with
+        known_bands) so that the selected_index from TextDisplay can be used
+        directly as the band index without any header-offset arithmetic.
+        """
+        self._set_text(self.antenna_analysis.get_known_band_names())
+
+    def _sync_text_display_selection(self):
+        """After a graph click changes the band selection, update the TextDisplay
+        highlight to match so the two selection surfaces stay in sync."""
+        if self._text_display is None:
+            return
+        self._text_display.set_selected_index(self.antenna_analysis.selected_band)
 
     # ---------------------------------------------------------------
     # Private: workflow helpers
