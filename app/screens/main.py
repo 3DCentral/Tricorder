@@ -165,6 +165,7 @@ class ScreenMain(LcarsScreen):
             spectrum_scan_display=self.spectrum_scan_display,
             demodulator=self.demodulator,
             process_manager=self.process_manager,
+            text_display=self.microscope_file_list,
             text_display_callback=lambda lines: self.microscope_file_list.set_lines(lines)
         )
 
@@ -294,6 +295,12 @@ class ScreenMain(LcarsScreen):
                         mode_index = (selected_line - 2) // 3
                         if mode_index != self.current_geospatial_mode:
                             self._switch_geospatial_mode(mode_index)
+
+                # In EMF antenna-characterization mode - relay band selection
+                elif self.antenna_analysis.visible and self.antenna_analysis.scan_complete:
+                    self.emf_manager.handle_text_display_selection(
+                        self.microscope_file_list.selected_index)
+
             return False
             
     def _loadMicroscopeImage(self):
@@ -750,8 +757,6 @@ class ScreenMain(LcarsScreen):
         self.microscope_widget.visible = True
         self.microscope_widget.start_live_view()
         
-        # Update text display with groups
-        self._update_microscope_display()
         # Update text display with groups
         self._update_microscope_display()
 
