@@ -529,16 +529,18 @@ class LcarsEMFManager:
 
             # CRITICAL: Preserve state during live updates
             was_targeted = self.antenna_analysis.targeted_mode
+            was_complete = self.antenna_analysis.scan_complete  # BUG FIX: Preserve completion state
             selected_band = self.antenna_analysis.selected_band
             target_min = self.antenna_analysis.target_freq_min_hz
             target_max = self.antenna_analysis.target_freq_max_hz
             has_baseline = self.antenna_analysis.has_baseline
             baseline_resonances = self.antenna_analysis.baseline_resonances
             tuning_history = self.antenna_analysis.tuning_history
+            resonances = self.antenna_analysis.resonances  # BUG FIX: Preserve resonances
             
             self.antenna_analysis.clear()
             
-            # Restore state
+            # Restore state BEFORE calling start_*_scan
             self.antenna_analysis.selected_band = selected_band
             self.antenna_analysis.target_freq_min_hz = target_min
             self.antenna_analysis.target_freq_max_hz = target_max
@@ -547,10 +549,15 @@ class LcarsEMFManager:
             self.antenna_analysis.tuning_history = tuning_history
             
             # Restore targeted_mode and start appropriate scan type
+            # Note: start_*_scan will set scan_complete=False and resonances=[]
             if was_targeted or self.targeted_scan:
                 self.antenna_analysis.start_targeted_scan()
             else:
                 self.antenna_analysis.start_scan()
+            
+            # BUG FIX: Restore these AFTER start_*_scan since those methods reset them
+            self.antenna_analysis.scan_complete = was_complete
+            self.antenna_analysis.resonances = resonances
                 
             for freq, nf in zip(frequencies, noise_floors):
                 self.antenna_analysis.add_data_point(float(freq), float(nf))
