@@ -261,8 +261,9 @@ class LcarsEMFManager:
             self.antenna_scan_active = True
             self.targeted_scan = True
             
-            # Enter targeted mode so the graph zooms to the band
+            # Enter targeted mode and set fixed frequency range for stable X-axis
             self.antenna_analysis.start_targeted_scan()
+            self.antenna_analysis.set_target_range(start_freq_hz, end_freq_hz)
             
             print("Targeted scan started - will take ~{} seconds".format(num_points * 0.2))
             return True
@@ -466,11 +467,7 @@ class LcarsEMFManager:
                 self.antenna_scan_active = False
                 scan_was_targeted = self.targeted_scan  # Save for later checks
                 
-                # CRITICAL: Load final data BEFORE resetting targeted_scan flag
-                # so _load_antenna_progress uses the correct file prefix
-                self._load_antenna_progress()
-                
-                # NOW we can reset the flag for the next scan
+                # Reset the flag for the next scan
                 self.targeted_scan = False
 
                 # Load resonances (written by the scanner after analysis)
@@ -530,10 +527,24 @@ class LcarsEMFManager:
             if len(frequencies) == len(self.antenna_analysis.frequencies):
                 return
 
-            # CRITICAL: Preserve targeted_mode flag during live updates
+            # CRITICAL: Preserve state during live updates
             was_targeted = self.antenna_analysis.targeted_mode
+            selected_band = self.antenna_analysis.selected_band
+            target_min = self.antenna_analysis.target_freq_min_hz
+            target_max = self.antenna_analysis.target_freq_max_hz
+            has_baseline = self.antenna_analysis.has_baseline
+            baseline_resonances = self.antenna_analysis.baseline_resonances
+            tuning_history = self.antenna_analysis.tuning_history
             
             self.antenna_analysis.clear()
+            
+            # Restore state
+            self.antenna_analysis.selected_band = selected_band
+            self.antenna_analysis.target_freq_min_hz = target_min
+            self.antenna_analysis.target_freq_max_hz = target_max
+            self.antenna_analysis.has_baseline = has_baseline
+            self.antenna_analysis.baseline_resonances = baseline_resonances
+            self.antenna_analysis.tuning_history = tuning_history
             
             # Restore targeted_mode and start appropriate scan type
             if was_targeted or self.targeted_scan:

@@ -60,6 +60,11 @@ class LcarsAntennaAnalysis(LcarsWidget):
         self.scan_active   = False
         self.scan_complete = False
         self.targeted_mode = False  # True when showing a high-density targeted scan
+        
+        # --- NEW: Fixed frequency range for targeted scans ------------------
+        # Set when starting a targeted scan to keep X-axis stable
+        self.target_freq_min_hz = None
+        self.target_freq_max_hz = None
 
         # --- NEW: Baseline reference (first targeted scan) ------------------
         self.baseline_resonances = []
@@ -132,6 +137,20 @@ class LcarsAntennaAnalysis(LcarsWidget):
         self.resonances    = []
         self.targeted_mode = True
         self._render()
+    
+    def set_target_range(self, freq_min_hz, freq_max_hz):
+        """
+        Set the target frequency range for a targeted scan.
+        This keeps the X-axis fixed during the scan instead of adjusting to data.
+        
+        Args:
+            freq_min_hz: Minimum frequency in Hz
+            freq_max_hz: Maximum frequency in Hz
+        """
+        self.target_freq_min_hz = freq_min_hz
+        self.target_freq_max_hz = freq_max_hz
+        print("Target range set: {:.2f} - {:.2f} MHz".format(
+            freq_min_hz / 1e6, freq_max_hz / 1e6))
 
     def add_data_point(self, freq_hz, noise_floor_db):
         """Append one measurement.  Called from the polling loop."""
@@ -197,6 +216,8 @@ class LcarsAntennaAnalysis(LcarsWidget):
         self.resonances    = []
         self.selected_band = None
         self.targeted_mode = False
+        self.target_freq_min_hz = None
+        self.target_freq_max_hz = None
         self._render()
 
     # ---------------------------------------------------------------
@@ -313,23 +334,31 @@ class LcarsAntennaAnalysis(LcarsWidget):
     def _get_freq_range(self):
         """Return the (freq_min_mhz, freq_max_mhz) to use for axis scaling.
         
-        In targeted mode, use the actual data bounds with 5% padding.
+        In targeted mode with a fixed target range set, use that (keeps X-axis stable).
+        In targeted mode without target range, use actual data bounds with 5% padding.
         In wide mode, use the hardcoded defaults.
         """
-        if self.targeted_mode and self.frequencies:
-            # Use actual data range with padding
-            freq_min_hz = min(self.frequencies)
-            freq_max_hz = max(self.frequencies)
-            span = freq_max_hz - freq_min_hz
-            padding = span * 0.05  # 5% padding on each side
+        if self.targeted_mode:
+            # If we have a fixed target range set, use it (keeps X-axis stable during scan)
+            if self.target_freq_min_hz is not None and self.target_freq_max_hz is not None:
+                freq_min_mhz = self.target_freq_min_hz / 1e6
+                freq_max_mhz = self.target_freq_max_hz / 1e6
+                return (freq_min_mhz, freq_max_mhz)
             
-            freq_min_mhz = max(1.0, (freq_min_hz - padding) / 1e6)  # Don't go below 1 MHz
-            freq_max_mhz = (freq_max_hz + padding) / 1e6
-            
-            return (freq_min_mhz, freq_max_mhz)
-        else:
-            # Wide scan: use full RTL-SDR range
-            return (self.FREQ_MIN_MHZ, self.FREQ_MAX_MHZ)
+            # Otherwise, use actual data range with padding (dynamic)
+            if self.frequencies:
+                freq_min_hz = min(self.frequencies)
+                freq_max_hz = max(self.frequencies)
+                span = freq_max_hz - freq_min_hz
+                padding = span * 0.05  # 5% padding on each side
+                
+                freq_min_mhz = max(1.0, (freq_min_hz - padding) / 1e6)  # Don't go below 1 MHz
+                freq_max_mhz = (freq_max_hz + padding) / 1e6
+                
+                return (freq_min_mhz, freq_max_mhz)
+        
+        # Wide scan: use full RTL-SDR range
+        return (self.FREQ_MIN_MHZ, self.FREQ_MAX_MHZ)
 
     def _freq_to_x(self, freq_hz, rect):
         """Map frequency (Hz) to screen X within rect."""
