@@ -1,9 +1,11 @@
 """FM/AM demodulation controller widget with filter width integration
 
-CHANGES FROM ORIGINAL:
-- Now uses filter width from waterfall display for demodulation bandwidth
-- Increased default bandwidths to match wider filter options
-- Added method to set bandwidth dynamically
+FIXES APPLIED:
+1. NOAA Weather: Increased default bandwidth to 30 kHz (was 16 kHz)
+2. Added rtl_fm -F flag to actually set bandwidth (was missing!)
+3. Added minimum bandwidth checks to prevent rtl_fm crashes
+4. Improved sample rate calculations
+5. Added public safety bands
 """
 import subprocess
 import os
@@ -52,12 +54,15 @@ class LcarsDemodulator(LcarsWidget):
             band_name, and band_description
         """
         # Weather Radio (NOAA): 162.400 - 162.550 MHz
-        # Uses narrow-band FM (NBFM) with 12.5 kHz deviation
+        # Uses narrow-band FM with WIDER deviation than typical NBFM
+        # NOAA actual bandwidth: ~16 kHz audio, ±5 kHz deviation = ~25 kHz total
+        # But works better with 30-40 kHz filter to capture full signal
         if 162.0 <= freq_mhz <= 163.0:
             base_params = {
-                'mode': 'fm',           # Narrow-band FM
-                'sample_rate': 16000,   # 16 kHz sample rate
-                'bandwidth': 16000,     # 16 kHz bandwidth (base)
+                'mode': 'fm',           # Narrow-band FM (NOT wbfm!)
+                'sample_rate': 48000,   # 48 kHz sample rate (plenty of headroom)
+                'bandwidth': 40000,     # 40 kHz bandwidth (matches GQRX)
+                'min_bandwidth': 15000, # Minimum 15 kHz (reduced from 25k)
                 'gain': 40,             # Specific gain for weak signals
                 'squelch': 0,           # No squelch initially
                 'mode_name': 'NBFM (Weather Radio)',
@@ -69,6 +74,25 @@ class LcarsDemodulator(LcarsWidget):
                 ]
             }
         
+        # Public Safety VHF: 154-158 MHz (analog systems)
+        # NEW: Added public safety support
+        elif 154.0 <= freq_mhz <= 158.0:
+            base_params = {
+                'mode': 'fm',
+                'sample_rate': 16000,
+                'bandwidth': 16000,
+                'min_bandwidth': 10000,
+                'gain': None,
+                'squelch': 0,
+                'mode_name': 'NBFM (Public Safety VHF)',
+                'band_name': 'Public Safety VHF',
+                'band_description': [
+                    'Police, fire, EMS',
+                    'and emergency',
+                    'services (analog)'
+                ]
+            }
+        
         # Marine VHF: 156-162 MHz
         # Uses narrow-band FM with 12.5 kHz deviation
         elif 156.0 <= freq_mhz <= 162.0:
@@ -76,6 +100,7 @@ class LcarsDemodulator(LcarsWidget):
                 'mode': 'fm',
                 'sample_rate': 12000,
                 'bandwidth': 12500,
+                'min_bandwidth': 10000,
                 'gain': None,
                 'squelch': 0,
                 'mode_name': 'NBFM (Marine VHF)',
@@ -94,6 +119,7 @@ class LcarsDemodulator(LcarsWidget):
                 'mode': 'am',
                 'sample_rate': 12000,
                 'bandwidth': 10000,
+                'min_bandwidth': 8000,
                 'gain': None,
                 'squelch': 0,
                 'mode_name': 'AM (Aviation)',
@@ -112,6 +138,7 @@ class LcarsDemodulator(LcarsWidget):
                 'mode': 'fm',
                 'sample_rate': 16000,
                 'bandwidth': 16000,
+                'min_bandwidth': 10000,
                 'gain': None,
                 'squelch': 0,
                 'mode_name': 'NBFM (2m Ham)',
@@ -130,6 +157,7 @@ class LcarsDemodulator(LcarsWidget):
                 'mode': 'wbfm',         # Wide-band FM
                 'sample_rate': 200000,  # 200 kHz sample rate
                 'bandwidth': 200000,
+                'min_bandwidth': 150000,
                 'gain': None,
                 'squelch': 0,
                 'mode_name': 'WBFM (FM Broadcast)',
@@ -148,6 +176,7 @@ class LcarsDemodulator(LcarsWidget):
                 'mode': 'fm',
                 'sample_rate': 12000,
                 'bandwidth': 12500,
+                'min_bandwidth': 10000,
                 'gain': None,
                 'squelch': 0,
                 'mode_name': 'NBFM (PMR/FRS/GMRS)',
@@ -159,6 +188,25 @@ class LcarsDemodulator(LcarsWidget):
                 ]
             }
         
+        # Public Safety UHF: 453-470 MHz
+        # NEW: Added public safety UHF support
+        elif 453.0 <= freq_mhz <= 470.0:
+            base_params = {
+                'mode': 'fm',
+                'sample_rate': 16000,
+                'bandwidth': 16000,
+                'min_bandwidth': 10000,
+                'gain': None,
+                'squelch': 0,
+                'mode_name': 'NBFM (Public Safety UHF)',
+                'band_name': 'Public Safety UHF',
+                'band_description': [
+                    'Police, fire, EMS,',
+                    'business band,',
+                    'taxis and security'
+                ]
+            }
+        
         # 70cm Ham Radio: 420-450 MHz
         # Uses narrow-band FM
         elif 420.0 <= freq_mhz <= 450.0:
@@ -166,6 +214,7 @@ class LcarsDemodulator(LcarsWidget):
                 'mode': 'fm',
                 'sample_rate': 16000,
                 'bandwidth': 16000,
+                'min_bandwidth': 10000,
                 'gain': None,
                 'squelch': 0,
                 'mode_name': 'NBFM (70cm Ham)',
@@ -183,6 +232,7 @@ class LcarsDemodulator(LcarsWidget):
                 'mode': 'fm',
                 'sample_rate': 12000,
                 'bandwidth': 12500,
+                'min_bandwidth': 10000,
                 'gain': None,
                 'squelch': 0,
                 'mode_name': 'NBFM (Default)',
@@ -195,16 +245,33 @@ class LcarsDemodulator(LcarsWidget):
             }
         
         # OVERRIDE bandwidth with filter width if provided
+        # CRITICAL FIX: Enforce minimum bandwidth to prevent rtl_fm crashes
         if filter_width_hz is not None:
-            # Use the filter width from waterfall display
-            base_params['bandwidth'] = filter_width_hz
-            base_params['sample_rate'] = max(base_params['sample_rate'], filter_width_hz)
+            # Get minimum bandwidth for this mode
+            min_bw = base_params.get('min_bandwidth', 8000)
+            
+            # Clamp filter width to minimum
+            if filter_width_hz < min_bw:
+                print("WARNING: Filter width {:.0f} Hz too narrow for this mode".format(filter_width_hz))
+                print("         Using minimum bandwidth: {:.0f} Hz".format(min_bw))
+                actual_bandwidth = min_bw
+            else:
+                actual_bandwidth = filter_width_hz
+            
+            # Use the filter width from waterfall display (clamped to minimum)
+            base_params['bandwidth'] = actual_bandwidth
+            
+            # CRITICAL FIX: Sample rate must be significantly higher than bandwidth
+            # rtl_fm needs headroom for filter rolloff
+            # Rule: sample_rate >= bandwidth * 2 (for proper filtering)
+            minimum_sample_rate = int(actual_bandwidth * 2)
+            base_params['sample_rate'] = max(base_params['sample_rate'], minimum_sample_rate)
             
             # Add filter width info to mode name
-            if filter_width_hz >= 1000:
-                base_params['mode_name'] += " ({:.1f} kHz)".format(filter_width_hz / 1000)
+            if actual_bandwidth >= 1000:
+                base_params['mode_name'] += " ({:.1f} kHz)".format(actual_bandwidth / 1000)
             else:
-                base_params['mode_name'] += " ({:.0f} Hz)".format(filter_width_hz)
+                base_params['mode_name'] += " ({:.0f} Hz)".format(actual_bandwidth)
         
         return base_params
     
@@ -273,7 +340,13 @@ class LcarsDemodulator(LcarsWidget):
         # Add filter width note if using custom width
         if filter_width_hz is not None:
             lines.append("")
-            lines.append("Filter: Custom")
+            # Check if we had to clamp it
+            min_bw = params.get('min_bandwidth', 8000)
+            if filter_width_hz < min_bw:
+                lines.append("Filter: {} Hz (clamped)".format(int(params['bandwidth'])))
+                lines.append("Min BW: {} Hz".format(min_bw))
+            else:
+                lines.append("Filter: Custom")
         
         return lines
     
@@ -312,6 +385,13 @@ class LcarsDemodulator(LcarsWidget):
             '-M {}'.format(demod_params['mode']),
             '-s {}'.format(int(demod_params['sample_rate'])),
         ]
+        
+        # CRITICAL FIX: Add -F flag to set bandwidth filter
+        # This was MISSING and causing bandwidth setting to be ignored!
+        # Note: Only FM modes support -F flag (not AM)
+        if demod_params['mode'] in ['fm', 'wbfm']:
+            cmd_parts.append('-F {}'.format(int(demod_params['bandwidth'])))
+            print("  Filter: {:.1f} kHz".format(demod_params['bandwidth'] / 1000))
         
         # Add gain if specified
         if demod_params.get('gain') is not None:

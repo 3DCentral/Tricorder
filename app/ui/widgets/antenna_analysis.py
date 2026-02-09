@@ -84,13 +84,28 @@ class LcarsAntennaAnalysis(LcarsWidget):
 
         # --- Known frequency bands for background highlighting --------------
         # All in MHz for the log-scale mapper
+        # TV bands added for over-the-air television reception (ATSC digital TV)
         self.known_bands = [
-            {'name': 'FM',      'start':  88, 'end': 108, 'color': (255, 165, 0), 'alpha': 40},
-            {'name': 'Air',     'start': 118, 'end': 137, 'color': (255, 255, 0), 'alpha': 40},
-            {'name': 'Wx Sat',  'start': 137, 'end': 138, 'color': (0, 255, 255), 'alpha': 50},
-            {'name': '2m Ham',  'start': 144, 'end': 148, 'color': (255,   0, 255), 'alpha': 40},
-            {'name': '70cm',    'start': 420, 'end': 450, 'color': (0, 100, 255), 'alpha': 40},
-            {'name': 'ADS-B',   'start':1090, 'end':1090, 'color': (0, 200,   0), 'alpha': 50},
+            # VHF TV Low Band (Channels 2-6)
+            {'name': 'TV VHF-Lo', 'start':  54, 'end':  88, 'color': (100, 150, 255), 'alpha': 45},
+            # FM Radio
+            {'name': 'FM',        'start':  88, 'end': 108, 'color': (255, 165, 0), 'alpha': 40},
+            # Aircraft Band
+            {'name': 'Air',       'start': 118, 'end': 137, 'color': (255, 255, 0), 'alpha': 40},
+            # Weather Satellites
+            {'name': 'Wx Sat',    'start': 137, 'end': 138, 'color': (0, 255, 255), 'alpha': 50},
+            # 2m Ham Radio
+            {'name': '2m Ham',    'start': 144, 'end': 148, 'color': (255,   0, 255), 'alpha': 40},
+            # VHF TV High Band (Channels 7-13)
+            {'name': 'TV VHF-Hi', 'start': 174, 'end': 216, 'color': (150, 100, 255), 'alpha': 45},
+            # 70cm Ham Radio
+            {'name': '70cm',      'start': 420, 'end': 450, 'color': (0, 100, 255), 'alpha': 40},
+            # UHF TV Band (Channels 14-36, primary UHF)
+            {'name': 'TV UHF',    'start': 470, 'end': 608, 'color': (255, 150, 100), 'alpha': 45},
+            # UHF TV High Band (Channels 37-50)
+            {'name': 'TV UHF-Hi', 'start': 608, 'end': 692, 'color': (255, 200, 100), 'alpha': 45},
+            # ADS-B Aircraft Tracking
+            {'name': 'ADS-B',     'start':1090, 'end':1090, 'color': (0, 200,   0), 'alpha': 50},
         ]
 
         # --- LCARS palette ---------------------------------------------------

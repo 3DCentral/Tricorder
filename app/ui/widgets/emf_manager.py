@@ -66,6 +66,20 @@ class LcarsEMFManager:
 
         # Waterfall polling state
         self._last_waterfall_check = 0
+        
+        # --- DEMODULATION MODE SELECTION ---
+        # Track which demodulation mode is selected
+        self.selected_demod_mode = 0  # Index into available modes
+        self.demod_modes = [
+            {
+                'name': 'FM Audio',
+                'description': 'Standard FM/AM demodulation',
+                'handler': self._demod_fm_audio
+            }
+            # Future modes will be added here:
+            # {'name': 'Pager Decode', 'description': 'POCSAG/FLEX pagers', ...},
+            # {'name': 'APRS', 'description': 'GPS tracking packets', ...},
+        ]
 
     # ---------------------------------------------------------------
     # Public interface — called by main.py
@@ -186,8 +200,34 @@ class LcarsEMFManager:
                     pass
                 self.antenna_scan_active = False
 
+            # Set up frequency selector based on selected band (if any)
             self._restore_scan_range()
-            print("Select a target frequency on the scale above")
+            
+            # Update text display with band info or generic message
+            if (self.antenna_analysis.scan_complete and 
+                self.antenna_analysis.selected_band is not None):
+                selected_band = self.antenna_analysis.get_selected_band()
+                if selected_band:
+                    # Show info about the pre-configured band
+                    info_lines = [
+                        "FREQUENCY SELECTOR",
+                        "",
+                        "Pre-configured for: {}".format(selected_band['name']),
+                        "Range: {:.1f}-{:.1f} MHz".format(
+                            selected_band['start'],
+                            selected_band['end']
+                        ),
+                        "",
+                        "Tap SCAN to analyze this band",
+                        "or click to select different frequency",
+                        "",
+                        "Use UP/DOWN arrows to adjust sweep range"
+                    ]
+                    self._set_text(info_lines)
+                else:
+                    print("Select a target frequency on the scale above")
+            else:
+                print("Select a target frequency on the scale above")
             return True
 
         # Static EMF gadget visible → switch to frequency selector
@@ -293,7 +333,11 @@ class LcarsEMFManager:
         return True
 
     def handle_record(self):
-        """Handle RECORD button while EMF is active. Returns True if consumed."""
+        """Handle RECORD button while EMF is active. Returns True if consumed.
+        
+        When waterfall is active, uses the selected demodulation mode from
+        the text display selector to determine what action to take.
+        """
         if not self.waterfall_display.visible and not (
                 self.spectrum_scan_display.visible and self.spectrum_scan_display.scan_complete):
             return False
@@ -321,11 +365,32 @@ class LcarsEMFManager:
             return False
 
         target_freq_hz = int(target_freq * 1e6)
+        
+        # Get selected demodulation mode and call its handler
+        if 0 <= self.selected_demod_mode < len(self.demod_modes):
+            mode = self.demod_modes[self.selected_demod_mode]
+            print("Using demod mode: {}".format(mode['name']))
+            mode['handler'](target_freq_hz)
+        else:
+            # Fallback to FM audio if index is invalid
+            self._demod_fm_audio(target_freq_hz)
+
+        return True
+    
+    def _demod_fm_audio(self, target_freq_hz):
+        """FM/AM audio demodulation handler (default mode).
+        
+        This is the original RECORD behavior - toggle FM/AM demodulation.
+        
+        Args:
+            target_freq_hz: Target frequency in Hz
+        """
         filter_width = None
         if self.waterfall_display.visible:
             filter_width = self.waterfall_display.get_filter_width()
 
         if self.demodulator.is_active():
+            # Stop demodulation
             self.demodulator.stop_demodulation()
             self._update_demod_info(target_freq_hz)
 
@@ -339,13 +404,12 @@ class LcarsEMFManager:
                 self.waterfall_display.start_scan(restart_freq)
                 print("Live waterfall scan restarted at {:.3f} MHz".format(restart_freq / 1e6))
         else:
+            # Start demodulation
             self.demodulator.start_demodulation(target_freq_hz, filter_width)
             self._update_demod_info(target_freq_hz)
 
             if self.waterfall_display.visible:
                 print("Live waterfall paused during demodulation")
-
-        return True
 
     def handle_click(self, event):
         """Handle mouse click while EMF is active. Returns True if consumed."""
@@ -638,25 +702,59 @@ class LcarsEMFManager:
     # ---------------------------------------------------------------
 
     def handle_text_display_selection(self, selected_index):
-        """Relay a TextDisplay line-click into a band selection on the graph.
+        """Relay a TextDisplay line-click into appropriate action.
 
-        Called by main.py when the user clicks a line in the TextDisplay while
-        antenna_analysis is visible and scan_complete.  The TextDisplay content
-        is a 1:1 list of known_band names, so selected_index maps directly to
-        the band index.  If it's out of range we just deselect.
+        Called by main.py when the user clicks a line in the TextDisplay.
+        
+        Behavior depends on context:
+        - Antenna analysis visible: Select a band
+        - Waterfall visible: Select demodulation mode
         """
-        if not self.antenna_analysis.scan_complete:
-            return
-
-        band_names = self.antenna_analysis.get_known_band_names()
-        if 0 <= selected_index < len(band_names):
-            # Toggle: if the user taps the already-selected line, deselect.
-            if self.antenna_analysis.selected_band == selected_index:
-                self.antenna_analysis.set_selected_band(None)
+        # Antenna analysis: band selection
+        if self.antenna_analysis.visible and self.antenna_analysis.scan_complete:
+            band_names = self.antenna_analysis.get_known_band_names()
+            if 0 <= selected_index < len(band_names):
+                # Toggle: if the user taps the already-selected line, deselect.
+                if self.antenna_analysis.selected_band == selected_index:
+                    self.antenna_analysis.set_selected_band(None)
+                else:
+                    self.antenna_analysis.set_selected_band(selected_index)
             else:
-                self.antenna_analysis.set_selected_band(selected_index)
-        else:
-            self.antenna_analysis.set_selected_band(None)
+                self.antenna_analysis.set_selected_band(None)
+            return
+        
+        # Waterfall: demod mode selection
+        if self.waterfall_display.visible:
+            # The text display shows:
+            # Line 0: "DEMOD MODE SELECT"
+            # Line 1: ""
+            # Line 2: "Tap mode for RECORD:"
+            # Line 3: ""
+            # Line 4+: Mode entries (2 lines each: name + description)
+            
+            # Calculate which mode was clicked
+            # First mode starts at line 4
+            if selected_index >= 4:
+                # Each mode takes 3 lines (name, description, blank)
+                # But we need to map click to mode index
+                mode_line_offset = selected_index - 4
+                
+                # Find which mode this maps to
+                line_counter = 0
+                for mode_idx, mode in enumerate(self.demod_modes):
+                    # Each mode: name line, description line, blank line
+                    if line_counter <= mode_line_offset < line_counter + 3:
+                        # Clicked on this mode
+                        if self.selected_demod_mode != mode_idx:
+                            self.selected_demod_mode = mode_idx
+                            print("Selected demod mode: {}".format(mode['name']))
+                            # Refresh display to show new selection
+                            freq = self._get_selected_frequency()
+                            if freq:
+                                self._update_demod_info(freq)
+                        return
+                    line_counter += 3
+            return
 
     def _push_band_list(self):
         """Write the known-band names into the TextDisplay.
@@ -687,7 +785,45 @@ class LcarsEMFManager:
         return None
 
     def _restore_scan_range(self):
-        """Restore the previous scan range on the frequency selector, if available."""
+        """Restore the previous scan range on the frequency selector, if available.
+        
+        Priority order:
+        1. Selected band from antenna_analysis (if scan complete and band selected)
+        2. Previous spectrum scan range (if available)
+        3. No range set (user must select manually)
+        """
+        # Check if antenna_analysis has a selected band
+        if (hasattr(self.antenna_analysis, 'scan_complete') and 
+            self.antenna_analysis.scan_complete and
+            self.antenna_analysis.selected_band is not None):
+            
+            selected_band = self.antenna_analysis.get_selected_band()
+            if selected_band:
+                # Convert band start/end from MHz to Hz
+                start_freq = int(selected_band['start'] * 1e6)
+                end_freq = int(selected_band['end'] * 1e6)
+                
+                # Calculate center frequency for the selected band
+                center_freq = (start_freq + end_freq) // 2
+                
+                # Set the target frequency to band center
+                self.frequency_selector.set_selected_frequency(center_freq)
+                
+                # Set scanning range to cover the entire band
+                self.frequency_selector.set_scanning_range(start_freq, end_freq)
+                
+                # Store for later use
+                self.current_scan_start_freq = start_freq
+                self.current_scan_end_freq = end_freq
+                
+                print("Pre-configured for {} band: {:.1f}-{:.1f} MHz".format(
+                    selected_band['name'],
+                    start_freq / 1e6,
+                    end_freq / 1e6
+                ))
+                return
+        
+        # Fall back to previous scan range if available
         if self.current_scan_start_freq and self.current_scan_end_freq:
             self.frequency_selector.set_scanning_range(
                 self.current_scan_start_freq,
@@ -764,11 +900,44 @@ class LcarsEMFManager:
             self.frequency_selector.set_scanning_range(start_freq, end_freq)
 
     def _update_demod_info(self, frequency_hz):
-        """Update the side text display with demodulation protocol info."""
-        filter_width = None
+        """Update the side text display with demodulation protocol info.
+        
+        When waterfall is active, show mode selector with available demodulation modes.
+        User can click to select which mode RECORD will activate.
+        """
+        # If waterfall is visible, show mode selector
         if self.waterfall_display.visible:
             filter_width = self.waterfall_display.get_filter_width()
-        self._set_text(self.demodulator.get_demodulation_info(frequency_hz, filter_width))
+            
+            # Build mode selector display
+            lines = []
+            lines.append("DEMOD MODE SELECT")
+            lines.append("")
+            lines.append("Tap mode for RECORD:")
+            lines.append("")
+            
+            # List all available modes
+            for i, mode in enumerate(self.demod_modes):
+                # Highlight selected mode
+                if i == self.selected_demod_mode:
+                    lines.append("> {} <".format(mode['name']))
+                else:
+                    lines.append("  {}".format(mode['name']))
+                lines.append("  {}".format(mode['description']))
+                lines.append("")
+            
+            # Show current demod info at bottom
+            lines.append("---")
+            demod_info = self.demodulator.get_demodulation_info(frequency_hz, filter_width)
+            # Skip the header, just show key details
+            for line in demod_info[2:]:  # Skip "DEMOD: X MHz" and blank line
+                lines.append(line)
+            
+            self._set_text(lines)
+        else:
+            # Not in waterfall mode - show standard demod info
+            filter_width = None
+            self._set_text(self.demodulator.get_demodulation_info(frequency_hz, filter_width))
 
     # ---------------------------------------------------------------
     # Private: rendering
@@ -794,3 +963,51 @@ class LcarsEMFManager:
         bg_surface.fill((0, 0, 0))
         screen.blit(bg_surface, bg_rect)
         screen.blit(text_surface, text_rect)
+
+    # ---------------------------------------------------------------
+    # TV Band Support (NEW - for over-the-air television)
+    # ---------------------------------------------------------------
+    
+    def get_tv_channel_frequency(self, channel_number):
+        """Get frequency information for a specific TV channel.
+        
+        North American ATSC digital TV channels:
+        - VHF Low: Channels 2-6 (54-88 MHz)
+        - VHF High: Channels 7-13 (174-216 MHz)
+        - UHF: Channels 14-69 (470-806 MHz)
+        
+        Args:
+            channel_number (int): TV channel number (2-69)
+            
+        Returns:
+            dict: {'center': freq_hz, 'lower': freq_hz, 'upper': freq_hz, 'bandwidth': 6e6}
+            or None if invalid channel
+        """
+        # VHF Low (Ch 2-6)
+        vhf_low = {
+            2: 57e6, 3: 63e6, 4: 69e6, 5: 79e6, 6: 85e6
+        }
+        
+        # VHF High (Ch 7-13)
+        vhf_high = {
+            7: 177e6, 8: 183e6, 9: 189e6, 10: 195e6,
+            11: 201e6, 12: 207e6, 13: 213e6
+        }
+        
+        # Check VHF bands first
+        if channel_number in vhf_low:
+            center = vhf_low[channel_number]
+        elif channel_number in vhf_high:
+            center = vhf_high[channel_number]
+        # UHF (Ch 14-69)
+        elif 14 <= channel_number <= 69:
+            center = 470e6 + (channel_number - 14) * 6e6 + 3e6
+        else:
+            return None
+        
+        return {
+            'center': center,
+            'lower': center - 3e6,
+            'upper': center + 3e6,
+            'bandwidth': 6e6
+        }
