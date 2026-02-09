@@ -15,6 +15,7 @@ from ui.widgets.screen import LcarsScreen
 from ui.widgets.process_manager import get_process_manager
 from ui.widgets.microscope_widget import LcarsMicroscopeWidget
 from ui.widgets.emf_manager import LcarsEMFManager
+from ui.widgets.pager_display import LcarsPagerDisplay
 import numpy as np
 from time import sleep
 import subprocess
@@ -150,6 +151,11 @@ class ScreenMain(LcarsScreen):
         # FM/AM Demodulator (non-visual)
         self.demodulator = LcarsDemodulator()
         self.waterfall_display.set_demodulator(self.demodulator)
+        self.pager_display = LcarsPagerDisplay(
+            pos=(429, 296),  # Adjust Y position to your waterfall bottom
+            size=(640, 240)
+        )
+        all_sprites.add(self.pager_display, layer=3)
 
         # Antenna analysis widget
         self.antenna_analysis = LcarsAntennaAnalysis((187, 299), (640, 480))
@@ -166,7 +172,8 @@ class ScreenMain(LcarsScreen):
             demodulator=self.demodulator,
             process_manager=self.process_manager,
             text_display=self.microscope_file_list,
-            text_display_callback=lambda lines: self.microscope_file_list.set_lines(lines)
+            text_display_callback=lambda lines: self.microscope_file_list.set_lines(lines),
+            pager_display=self.pager_display
         )
 
         self.beep1 = Sound("assets/audio/panel/201.wav")
