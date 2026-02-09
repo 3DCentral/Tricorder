@@ -171,7 +171,7 @@ class LcarsTextDisplay(LcarsWidget):
             text_color = self.selected_color if is_selected else self.text_color
             
             # Truncate line if too long
-            max_chars = int((self.display_width - 20) / (self.font_size * 0.6))
+            max_chars = 2*int((self.display_width - 20) / (self.font_size * 0.6))
             if len(line_text) > max_chars:
                 line_text = line_text[:max_chars - 3] + "..."
             

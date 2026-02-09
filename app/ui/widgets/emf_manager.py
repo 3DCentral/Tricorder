@@ -19,7 +19,7 @@ class LcarsEMFManager:
     def __init__(self, emf_button, emf_gadget, antenna_analysis,
                  waterfall_display, frequency_selector, spectrum_scan_display,
                  demodulator, process_manager, text_display_callback,
-                 text_display=None):
+                 text_display=None, pager_display=None):
         """
         Args:
             emf_button: The LcarsEMF sidebar button (has .scanning flag)
@@ -32,12 +32,14 @@ class LcarsEMFManager:
             process_manager: Shared ProcessManager instance
             text_display_callback: Function(lines) to update the side text display
             text_display: The LcarsTextDisplay widget itself (for set_selected_index)
+            pager_display: LcarsPagerDisplay widget for pager decode mode
         """
         # Widget references
         self.emf_button = emf_button
         self.emf_gadget = emf_gadget
         self.antenna_analysis = antenna_analysis
         self.waterfall_display = waterfall_display
+        self.pager_display = pager_display
         self.frequency_selector = frequency_selector
         self.spectrum_scan_display = spectrum_scan_display
         self.demodulator = demodulator
@@ -69,17 +71,21 @@ class LcarsEMFManager:
         
         # --- DEMODULATION MODE SELECTION ---
         # Track which demodulation mode is selected
-        self.selected_demod_mode = 0  # Index into available modes
+        self.selected_demod_mode = 1  # Index into available modes
         self.demod_modes = [
             {
                 'name': 'FM Audio',
-                'description': 'Standard FM/AM demodulation',
                 'handler': self._demod_fm_audio
+            },
+            {
+                'name': 'Pager Decode',
+                'handler': self._demod_pager
             }
-            # Future modes will be added here:
-            # {'name': 'Pager Decode', 'description': 'POCSAG/FLEX pagers', ...},
-            # {'name': 'APRS', 'description': 'GPS tracking packets', ...},
         ]
+        
+        # Pager decoder state
+        self.pager_process = None
+        self.pager_active = False
 
     # ---------------------------------------------------------------
     # Public interface — called by main.py
@@ -147,6 +153,16 @@ class LcarsEMFManager:
         self.frequency_selector.visible = False
         self.spectrum_scan_display.visible = False
         self.emf_gadget.emf_scanning = False
+        # Stop pager decoder if active
+        if self.pager_active:
+            if hasattr(self, 'pager_reader') and self.pager_reader:
+                self.pager_reader.stop()
+            self.process_manager.kill_process('pager_decoder')
+            self.pager_active = False
+        
+        # Hide pager display
+        if self.pager_display:
+            self.pager_display.visible = False
 
     def update(self, screen):
         """Per-frame polling. Call once per frame from main update loop."""
@@ -725,35 +741,20 @@ class LcarsEMFManager:
         
         # Waterfall: demod mode selection
         if self.waterfall_display.visible:
-            # The text display shows:
-            # Line 0: "DEMOD MODE SELECT"
-            # Line 1: ""
-            # Line 2: "Tap mode for RECORD:"
-            # Line 3: ""
-            # Line 4+: Mode entries (2 lines each: name + description)
+            # The text display shows one line per mode at the top
+            # Line 0: "> FM Audio <" or "  FM Audio"
+            # Line 1: "  Pager Decode" etc.
+            # Then blank line, then status info
             
-            # Calculate which mode was clicked
-            # First mode starts at line 4
-            if selected_index >= 4:
-                # Each mode takes 3 lines (name, description, blank)
-                # But we need to map click to mode index
-                mode_line_offset = selected_index - 4
-                
-                # Find which mode this maps to
-                line_counter = 0
-                for mode_idx, mode in enumerate(self.demod_modes):
-                    # Each mode: name line, description line, blank line
-                    if line_counter <= mode_line_offset < line_counter + 3:
-                        # Clicked on this mode
-                        if self.selected_demod_mode != mode_idx:
-                            self.selected_demod_mode = mode_idx
-                            print("Selected demod mode: {}".format(mode['name']))
-                            # Refresh display to show new selection
-                            freq = self._get_selected_frequency()
-                            if freq:
-                                self._update_demod_info(freq)
-                        return
-                    line_counter += 3
+            # Check if clicked on a mode (first N lines)
+            if selected_index < len(self.demod_modes):
+                if self.selected_demod_mode != selected_index:
+                    self.selected_demod_mode = selected_index
+                    print("Selected demod mode: {}".format(self.demod_modes[selected_index]['name']))
+                    # Refresh display to show new selection
+                    freq = self._get_selected_frequency()
+                    if freq:
+                        self._update_demod_info(freq)
             return
 
     def _push_band_list(self):
@@ -909,27 +910,22 @@ class LcarsEMFManager:
         if self.waterfall_display.visible:
             filter_width = self.waterfall_display.get_filter_width()
             
-            # Build mode selector display
+            # Build simplified mode selector display
             lines = []
-            lines.append("DEMOD MODE SELECT")
-            lines.append("")
-            lines.append("Tap mode for RECORD:")
-            lines.append("")
             
-            # List all available modes
+            # List all available modes (one line each)
             for i, mode in enumerate(self.demod_modes):
-                # Highlight selected mode
+                # Highlight selected mode with > <
                 if i == self.selected_demod_mode:
                     lines.append("> {} <".format(mode['name']))
                 else:
                     lines.append("  {}".format(mode['name']))
-                lines.append("  {}".format(mode['description']))
-                lines.append("")
             
-            # Show current demod info at bottom
-            lines.append("---")
+            lines.append("")  # Separator
+            
+            # Show current demod status
             demod_info = self.demodulator.get_demodulation_info(frequency_hz, filter_width)
-            # Skip the header, just show key details
+            # Just show key details starting after header
             for line in demod_info[2:]:  # Skip "DEMOD: X MHz" and blank line
                 lines.append(line)
             
@@ -1011,3 +1007,108 @@ class LcarsEMFManager:
             'upper': center + 3e6,
             'bandwidth': 6e6
         }
+        
+    def _demod_pager(self, target_freq_hz):
+        """Pager decoder handler with split-screen display"""
+        
+        if self.pager_active:
+            # STOP PAGER MODE
+            print("Stopping pager decoder...")
+            
+            # Stop the reader threads
+            if hasattr(self, 'pager_reader') and self.pager_reader:
+                self.pager_reader.stop()
+                self.pager_reader = None
+            
+            if hasattr(self, 'audio_reader') and self.audio_reader:
+                self.audio_reader.stop()
+                self.audio_reader = None
+            
+            # Kill the process
+            self.process_manager.kill_process('pager_decoder')
+            self.pager_process = None
+            self.pager_active = False
+            
+            # Hide pager display
+            if self.pager_display:
+                self.pager_display.visible = False
+                self.pager_display.clear()
+            
+            # Restore full waterfall
+            if self.waterfall_display:
+                # Restore to full size
+                self.waterfall_display.rect.height = 480  # Full height
+                # Restart if paused
+                if not self.waterfall_display.scan_active:
+                    print("Restarting waterfall...")
+                    sleep(0.5)
+                    self.waterfall_display.start_scan(target_freq_hz)
+            
+            self._update_demod_info(target_freq_hz)
+            
+        else:
+            # START PAGER MODE
+            freq_mhz = target_freq_hz / 1e6
+            
+            print("Starting pager decoder at {:.3f} MHz...".format(freq_mhz))
+            
+            # Build command WITHOUT -a SCOPE (prevents GUI window popup)
+            # We'll capture the raw audio for our own oscilloscope rendering
+            # Use 'tee' to duplicate the audio stream:
+            #   - One copy goes to multimon-ng for decoding
+            #   - One copy goes to our audio processor for waveform display
+            
+            # Create named pipe for audio splitting
+            import tempfile
+            audio_fifo = tempfile.mktemp(suffix='.fifo')
+            os.mkfifo(audio_fifo)
+            
+            # Command splits audio to both decoder and our display
+            cmd = '''
+            rtl_fm -f {}M -M fm -s 22050 -g 40 - | 
+            tee {} | 
+            multimon-ng -v 2 -t raw -a POCSAG512 -a POCSAG1200 -a POCSAG2400 -a FLEX /dev/stdin
+            '''.format(freq_mhz, audio_fifo)
+            
+            # Start process with PIPE (not DEVNULL) so we can read output
+            self.pager_process = subprocess.Popen(
+                ['bash', '-c', cmd],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                preexec_fn=os.setsid
+            )
+            
+            self.pager_active = True
+            
+            # Show pager display
+            if self.pager_display:
+                self.pager_display.visible = True
+                self.pager_display.clear()
+                
+                # Start output reader thread for decoded messages
+                from ui.widgets.pager_display import PagerOutputReader
+                self.pager_reader = PagerOutputReader(
+                    self.pager_process,
+                    self.pager_display
+                )
+                self.pager_reader.start()
+                
+                # Start audio reader thread for waveform display
+                from ui.widgets.pager_display import AudioWaveformReader
+                self.audio_reader = AudioWaveformReader(
+                    audio_fifo,
+                    self.pager_display
+                )
+                self.audio_reader.start()
+            
+            # Crop waterfall to top half
+            if self.waterfall_display:
+                # Make waterfall half height
+                self.waterfall_display.rect.height = 240  # Half height
+                # Pause if running
+                if self.waterfall_display.scan_active:
+                    print("Pausing waterfall during pager decode")
+                    self.waterfall_display.stop_scan()
+            
+            self._update_demod_info(target_freq_hz)
+            print("Pager decoder active - SCOPE on left, messages on right")
