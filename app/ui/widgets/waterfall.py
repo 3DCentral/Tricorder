@@ -14,6 +14,28 @@ from ui.widgets.process_manager import get_process_manager
 # Selection indicator color (purple for better visibility over waterfall data)
 SELECTION_COLOR = (204, 153, 204)  # LCARS purple
 
+
+SNAP_CONFIG = {
+    # Temporal averaging
+    'max_frames_to_average': 150,  # Cap at 150 frames (5 sec @ 30 Hz)
+    
+    # Signal detection
+    'noise_threshold_db': 12,      # Signal must be 12dB above noise floor
+    'min_signal_width_bins': 3,    # Ignore spikes < 3 bins wide (~few kHz)
+    
+    # Signal width classification
+    'wide_signal_threshold_khz': 20,  # Use centroid for signals > 20 kHz
+    
+    # Fallback
+    'fallback_rounding_hz': 5000,  # Round to 5 kHz if no signal found
+    
+    # Visual feedback colors
+    'color_manual': (204, 153, 204),      # Purple - exact click
+    'color_peak': (100, 255, 100),        # Green - locked onto peak
+    'color_centroid': (100, 200, 255),    # Blue - locked onto wide signal
+    'color_rounded': (255, 255, 100),     # Yellow - rounded (no signal)
+}
+
 class LcarsWaterfall(LcarsWidget):
     """
     Waterfall display widget for live SDR spectrum visualization
@@ -91,6 +113,9 @@ class LcarsWaterfall(LcarsWidget):
         # OPTIMIZATION: Cache rendered waterfall surface to avoid re-rendering when paused
         self.cached_waterfall_surface = None
         self.data_hash = None  # Track if data has changed
+        
+        # Signal snapping state
+        self.selection_snap_type = None  # 'peak', 'centroid', 'rounded', or None
     
     def stop_scan(self):
         """Stop the waterfall scan"""
@@ -300,15 +325,33 @@ class LcarsWaterfall(LcarsWidget):
         
         return frequency
     
-    def set_selected_frequency(self, frequency):
-        """Set the selected target frequency
+    def set_selected_frequency(self, frequency, apply_snapping=True):
+        """Set the selected target frequency with optional signal-aware snapping
         
         Args:
             frequency: Frequency in Hz
+            apply_snapping: If True, snap to detected signals (default: True)
         """
         if self.frequencies is None:
             return
+        
+        # Apply signal-aware snapping
+        if apply_snapping and self.waterfall_data is not None:
+            snapped_freq, snap_type = self._find_signal_at_frequency(frequency)
             
+            if snap_type:
+                self.selection_snap_type = snap_type
+                frequency = snapped_freq
+                
+                # Log the snap if significant
+                if abs(snapped_freq - frequency) > 1000:  # > 1 kHz
+                    print("  Snapped from {:.4f} MHz to {:.3f} MHz ({})".format(
+                        frequency / 1e6, snapped_freq / 1e6, snap_type))
+            else:
+                self.selection_snap_type = None
+        else:
+            self.selection_snap_type = None
+        
         self.selected_frequency = frequency
         
         # Calculate X position for drawing
@@ -443,9 +486,19 @@ class LcarsWaterfall(LcarsWidget):
         surface.blit(text, text_rect)
     
     def _draw_frequency_selector(self, surface):
-        """Draw the frequency selection indicator with FILTER WIDTH visualization"""
+        """Draw the frequency selection indicator with signal-aware color"""
         if self.selected_x is None or self.selected_frequency is None:
             return
+        
+        # Choose color based on snap type
+        if self.selection_snap_type == 'peak':
+            color = SNAP_CONFIG['color_peak']
+        elif self.selection_snap_type == 'centroid':
+            color = SNAP_CONFIG['color_centroid']
+        elif self.selection_snap_type == 'rounded':
+            color = SNAP_CONFIG['color_rounded']
+        else:
+            color = SNAP_CONFIG['color_manual']  # Purple - no snapping
         
         # Use filter width (not demodulator bandwidth)
         filter_bandwidth_hz = self.filter_width
@@ -470,42 +523,52 @@ class LcarsWaterfall(LcarsWidget):
             if box_width > 0:
                 # Create semi-transparent overlay
                 bandwidth_surface = pygame.Surface((box_width, box_height))
-                bandwidth_surface.set_alpha(60)  # Very transparent
-                bandwidth_surface.fill(SELECTION_COLOR)  # Purple tint
+                bandwidth_surface.set_alpha(60)
+                bandwidth_surface.fill(color)
                 surface.blit(bandwidth_surface, (x_left, self.psd_height))
                 
                 # Draw border of bandwidth box
-                pygame.draw.rect(surface, SELECTION_COLOR, 
+                pygame.draw.rect(surface, color, 
                                (x_left, self.psd_height, box_width, box_height), 2)
         
         # Draw vertical line through ENTIRE display (including PSD area)
-        # This makes it much easier to see the selection in both the waterfall and PSD
-        pygame.draw.line(surface, SELECTION_COLOR, 
-                        (self.selected_x, 0),  # Start from top of PSD
+        pygame.draw.line(surface, color, 
+                        (self.selected_x, 0),
                         (self.selected_x, self.display_height - 40), 
-                        3)  # Slightly thicker for visibility
+                        3)
         
         # Draw crosshair at top
         crosshair_y = self.psd_height + 20
-        pygame.draw.line(surface, SELECTION_COLOR,
+        pygame.draw.line(surface, color,
                         (self.selected_x - 10, crosshair_y),
                         (self.selected_x + 10, crosshair_y), 2)
-        pygame.draw.line(surface, SELECTION_COLOR,
+        pygame.draw.line(surface, color,
                         (self.selected_x, crosshair_y - 10),
                         (self.selected_x, crosshair_y + 10), 2)
         
-        # Draw frequency label with FILTER WIDTH info
+        # Draw frequency label with snap type indicator
         font = pygame.font.Font("assets/swiss911.ttf", 20)
         freq_mhz = self.selected_frequency / 1e6
         
-        # Show filter width in label
+        # Build label with filter width and snap indicator
         if filter_bandwidth_hz >= 1000:
-            bw_text = "{:.1f} kHz filter".format(filter_bandwidth_hz / 1000)
+            bw_text = "{:.1f} kHz".format(filter_bandwidth_hz / 1000)
         else:
-            bw_text = "{:.0f} Hz filter".format(filter_bandwidth_hz)
-        label_text = "{:.3f} MHz ({})".format(freq_mhz, bw_text)
+            bw_text = "{:.0f} Hz".format(filter_bandwidth_hz)
         
-        text = font.render(label_text, True, SELECTION_COLOR)
+        # Add snap type indicator
+        if self.selection_snap_type == 'peak':
+            snap_indicator = " ."  # Locked on peak
+        elif self.selection_snap_type == 'centroid':
+            snap_indicator = " O"  # Locked on wide signal
+        elif self.selection_snap_type == 'rounded':
+            snap_indicator = " ~"   # Rounded
+        else:
+            snap_indicator = ""     # Manual
+        
+        label_text = "{:.3f} MHz ({}){} ".format(freq_mhz, bw_text, snap_indicator)
+        
+        text = font.render(label_text, True, color)
         text_rect = text.get_rect(center=(self.selected_x, crosshair_y + 30))
         
         # Draw background for text
@@ -521,6 +584,7 @@ class LcarsWaterfall(LcarsWidget):
         bg_surface.fill((0, 0, 0))
         surface.blit(bg_surface, bg_rect)
         surface.blit(text, text_rect)
+
     
     def update(self, screen):
         """Update and render the waterfall display"""
@@ -544,3 +608,213 @@ class LcarsWaterfall(LcarsWidget):
         screen.blit(self.image, self.rect)
         
         self.dirty = 0
+        
+    def _compute_noise_floor(self, psd_data):
+        """
+        Compute noise floor across entire spectrum
+        
+        Args:
+            psd_data: 1D or 2D array of PSD values in dB
+            
+        Returns:
+            float: Noise floor estimate in dB
+        """
+        # Use median as robust noise floor estimate
+        # (mean would be pulled up by signals)
+        return np.median(psd_data)
+
+
+    def _find_local_peaks(self, signal_1d, threshold_db):
+        """
+        Find local maxima in 1D signal that exceed threshold
+        
+        Args:
+            signal_1d: 1D array of signal values in dB
+            threshold_db: Minimum value to be considered a peak
+            
+        Returns:
+            list: Indices of peaks, sorted by strength (strongest first)
+        """
+        peaks = []
+        
+        # Simple peak detection: point higher than neighbors
+        for i in range(1, len(signal_1d) - 1):
+            if (signal_1d[i] > threshold_db and 
+                signal_1d[i] > signal_1d[i-1] and 
+                signal_1d[i] > signal_1d[i+1]):
+                peaks.append(i)
+        
+        # Sort by signal strength (descending)
+        peaks.sort(key=lambda idx: signal_1d[idx], reverse=True)
+        
+        return peaks
+
+
+    def _measure_signal_width(self, signal_1d, peak_idx, db_drop=3.0):
+        """
+        Measure signal width at -3dB points
+        
+        Args:
+            signal_1d: 1D array of signal values in dB
+            peak_idx: Index of peak
+            db_drop: dB below peak to measure width (default: 3dB)
+            
+        Returns:
+            int: Width in bins
+        """
+        peak_value = signal_1d[peak_idx]
+        threshold = peak_value - db_drop
+        
+        # Find left edge
+        left_idx = peak_idx
+        while left_idx > 0 and signal_1d[left_idx] > threshold:
+            left_idx -= 1
+        
+        # Find right edge
+        right_idx = peak_idx
+        while right_idx < len(signal_1d) - 1 and signal_1d[right_idx] > threshold:
+            right_idx += 1
+        
+        return right_idx - left_idx
+
+
+    def _compute_signal_centroid(self, signal_1d, frequencies_1d, threshold_db):
+        """
+        Compute center of mass of signal energy
+        
+        Args:
+            signal_1d: 1D array of signal values in dB
+            frequencies_1d: 1D array of frequencies
+            threshold_db: Only include energy above this threshold
+            
+        Returns:
+            float: Centroid frequency in Hz
+        """
+        # Convert dB to linear power for centroid calculation
+        power_linear = 10 ** (signal_1d / 10.0)
+        
+        # Only include bins above threshold
+        mask = signal_1d > threshold_db
+        if not np.any(mask):
+            return None
+        
+        # Compute weighted average
+        numerator = np.sum(frequencies_1d[mask] * power_linear[mask])
+        denominator = np.sum(power_linear[mask])
+        
+        if denominator == 0:
+            return None
+        
+        return numerator / denominator
+
+
+    def _find_signal_at_frequency(self, clicked_freq):
+        """
+        Find actual signal near clicked frequency using waterfall data
+        
+        Strategy:
+        1. Define search window around click (±filter_width/2)
+        2. Average waterfall frames in that window (temporal smoothing)
+        3. Detect peaks above noise floor
+        4. Classify as narrow (peak) or wide (centroid) signal
+        5. Return snapped frequency and type
+        
+        Args:
+            clicked_freq: Raw clicked frequency in Hz
+            
+        Returns:
+            tuple: (snapped_freq_hz, snap_type)
+                snapped_freq_hz: Frequency to snap to
+                snap_type: 'peak', 'centroid', 'rounded', or None
+        """
+        # Check if we have data
+        if self.waterfall_data is None or self.frequencies is None:
+            return clicked_freq, None
+        
+        # Define search window (clamp to available data)
+        window_width = self.filter_width / 2
+        search_min = max(self.frequencies[0], clicked_freq - window_width)
+        search_max = min(self.frequencies[-1], clicked_freq + window_width)
+        
+        # Find frequency indices for search window
+        freq_mask = (self.frequencies >= search_min) & (self.frequencies <= search_max)
+        freq_indices = np.where(freq_mask)[0]
+        
+        if len(freq_indices) < 3:  # Need at least a few bins
+            # Fallback: round to nearest 5 kHz
+            rounded_freq = round(clicked_freq / SNAP_CONFIG['fallback_rounding_hz']) * SNAP_CONFIG['fallback_rounding_hz']
+            return rounded_freq, 'rounded'
+        
+        # Extract search window
+        search_freqs = self.frequencies[freq_indices]
+        
+           # Detect both continuous and transient signals
+        # Use all available frames, up to max
+        num_frames = min(len(self.waterfall_data), SNAP_CONFIG['max_frames_to_average'])
+        waterfall_window = self.waterfall_data[:num_frames, freq_indices]
+        
+        # Strategy: Use MAX to preserve transients, then smooth to reduce noise
+        # MAX across time (axis=0) preserves brief strong signals
+        max_psd = np.max(waterfall_window, axis=0)
+        
+        # Apply light spatial smoothing (across frequency) to reduce noise spikes
+        # Moving average with window of 3 bins
+        if len(max_psd) >= 3:
+            smoothed_psd = np.convolve(max_psd, np.ones(3)/3, mode='same')
+            averaged_psd = smoothed_psd
+        else:
+            averaged_psd = max_psd
+        
+        # Compute noise floor from entire spectrum
+        noise_floor = self._compute_noise_floor(self.waterfall_data[:num_frames])
+        
+        # Threshold for peak detection
+        peak_threshold = noise_floor + SNAP_CONFIG['noise_threshold_db']
+        
+        # Find peaks
+        peaks = self._find_local_peaks(averaged_psd, peak_threshold)
+        
+        if not peaks:
+            # No signals found - fallback to rounding
+            rounded_freq = round(clicked_freq / SNAP_CONFIG['fallback_rounding_hz']) * SNAP_CONFIG['fallback_rounding_hz']
+            return rounded_freq, 'rounded'
+        
+        # Filter out noise spikes (too narrow)
+        valid_peaks = []
+        for peak_idx in peaks:
+            width = self._measure_signal_width(averaged_psd, peak_idx, db_drop=3.0)
+            if width >= SNAP_CONFIG['min_signal_width_bins']:
+                valid_peaks.append((peak_idx, width))
+        
+        if not valid_peaks:
+            # All peaks were noise spikes - fallback
+            rounded_freq = round(clicked_freq / SNAP_CONFIG['fallback_rounding_hz']) * SNAP_CONFIG['fallback_rounding_hz']
+            return rounded_freq, 'rounded'
+        
+        # Find peak closest to clicked frequency
+        clicked_idx = np.argmin(np.abs(search_freqs - clicked_freq))
+        closest_peak = min(valid_peaks, key=lambda p: abs(p[0] - clicked_idx))
+        peak_idx, signal_width = closest_peak
+        
+        # Determine if narrow or wide signal
+        freq_bin_width = search_freqs[1] - search_freqs[0] if len(search_freqs) > 1 else 1000
+        signal_width_hz = signal_width * freq_bin_width
+        
+        if signal_width_hz > SNAP_CONFIG['wide_signal_threshold_khz'] * 1000:
+            # Wide signal - use centroid
+            centroid_freq = self._compute_signal_centroid(
+                averaged_psd, search_freqs, peak_threshold
+            )
+            
+            if centroid_freq:
+                print("Signal lock: CENTROID at {:.3f} MHz (width: {:.1f} kHz)".format(
+                    centroid_freq / 1e6, signal_width_hz / 1000))
+                return centroid_freq, 'centroid'
+        
+        # Narrow signal - use peak
+        peak_freq = search_freqs[peak_idx]
+        print("Signal lock: PEAK at {:.3f} MHz (width: {:.1f} kHz, strength: {:.1f} dB)".format(
+            peak_freq / 1e6, signal_width_hz / 1000, 
+            averaged_psd[peak_idx] - noise_floor))
+        
+        return peak_freq, 'peak'        
