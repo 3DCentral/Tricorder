@@ -1063,14 +1063,21 @@ class LcarsEMFManager:
             audio_fifo = tempfile.mktemp(suffix='.fifo')
             os.mkfifo(audio_fifo)
             
-            # Command splits audio to both decoder and our display
+            # Command structure:
+            # 1. rtl_fm produces audio
+            # 2. tee splits to: audio_fifo (for waveform) AND stdout (continues in pipe)
+            # 3. tee again splits to: play (for speakers) AND multimon-ng (for decoding)
+            # 4. multimon-ng output goes to stdout (captured by PagerOutputReader)
+            #
+            # Flow: rtl_fm | tee fifo | tee >(play) | multimon-ng
             cmd = '''
             rtl_fm -f {}M -M fm -s 22050 -g 40 - | 
             tee {} | 
+            tee >(play -t raw -r 22050 -es -b 16 -c 1 -V1 - 2>/dev/null) | 
             multimon-ng -v 2 -t raw -a POCSAG512 -a POCSAG1200 -a POCSAG2400 -a FLEX /dev/stdin
             '''.format(freq_mhz, audio_fifo)
             
-            # Start process with PIPE (not DEVNULL) so we can read output
+            # Start process with PIPE so we can read multimon-ng's stdout
             self.pager_process = subprocess.Popen(
                 ['bash', '-c', cmd],
                 stdout=subprocess.PIPE,

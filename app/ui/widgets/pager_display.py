@@ -171,7 +171,7 @@ class LcarsPagerDisplay(LcarsWidget):
         pygame.draw.rect(surface, self.border_color, scope_rect, 2)
     
     def _draw_messages(self, surface):
-        """Draw decoded messages on right side"""
+        """Draw decoded messages on right side with text wrapping"""
         # Message area
         msg_rect = pygame.Rect(self.scope_width, 0, self.msg_width, self.height)
         
@@ -182,26 +182,49 @@ class LcarsPagerDisplay(LcarsWidget):
         label = self.font_medium.render("MESSAGES", True, self.message_color)
         surface.blit(label, (self.scope_width + 10, 10))
         
-        # Draw messages (bottom-up, newest at bottom)
+        # Draw messages (bottom-up, newest at bottom) with wrapping
         if self.messages:
             y_pos = self.height - 15  # Start from bottom
-            line_height = 18
+            line_height = 20
+            max_chars = (self.msg_width - 20) // 9  # Characters that fit per line
             
             # Draw messages from newest to oldest (reverse order)
             for message in reversed(self.messages):
-                if y_pos < 35:  # Don't overlap with label
+                if y_pos < 40:  # Don't overlap with label
                     break
                 
-                # Truncate long messages
-                max_chars = 2*(self.msg_width - 20) // 9  # Rough char width
-                if len(message) > max_chars:
-                    message = message[:max_chars - 3] + "..."
+                # Wrap long messages into multiple lines
+                wrapped_lines = []
+                remaining = message
                 
-                # Render message
-                text = self.font_small.render(message, True, self.message_color)
-                surface.blit(text, (self.scope_width + 10, y_pos))
+                while remaining:
+                    if len(remaining) <= max_chars:
+                        # Last chunk fits
+                        wrapped_lines.append(remaining)
+                        break
+                    else:
+                        # Try to break at a space if possible
+                        break_point = max_chars
+                        space_pos = remaining.rfind(' ', 0, max_chars)
+                        if space_pos > max_chars * 0.7:  # Only break at space if it's not too early
+                            break_point = space_pos
+                        
+                        wrapped_lines.append(remaining[:break_point])
+                        remaining = remaining[break_point:].lstrip()
                 
-                y_pos -= line_height
+                # Draw wrapped lines from bottom to top
+                for line_text in reversed(wrapped_lines):
+                    if y_pos < 40:  # Stop if we run out of space
+                        break
+                    
+                    # Render message line
+                    text = self.font_small.render(line_text, True, self.message_color)
+                    surface.blit(text, (self.scope_width + 10, y_pos))
+                    
+                    y_pos -= line_height
+                
+                # Add small gap between messages
+                y_pos -= 5
         else:
             # Show "waiting" message
             waiting = self.font_small.render("Waiting for pager traffic...", 
