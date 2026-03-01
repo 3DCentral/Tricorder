@@ -47,18 +47,12 @@ FREQ_MAX      = 1.76e9      # Hz - R820T2 tuner max
 NUM_POINTS    = 60          # Log-spaced sample points (up from 30)
 SETTLE_TIME   = 0.05        # Seconds to let the tuner settle after retuning
 
-# Ranges known to cause issues on common RTL-SDR dongles
-SKIP_RANGES   = [
-    (1.05e9, 1.2e9),        # 1050-1200 MHz problematic on many dongles
-]
-
-
-def is_skipped(freq):
-    """Return True if freq falls inside a known-bad range."""
-    for lo, hi in SKIP_RANGES:
-        if lo <= freq <= hi:
-            return True
-    return False
+# No frequency ranges are skipped.  The R820T2 can return noisy readings at
+# certain frequencies near its internal LO harmonics (~1.1-1.15 GHz), but this
+# just means those data points will have inaccurate noise-floor values — it does
+# not crash the hardware or the process.  Skipping entire ranges was masking a
+# real bug (OSError handling) and breaking targeted scans for bands like ADS-B
+# at 1090 MHz that fell inside the old exclusion zone.
 
 
 def measure_noise_floor(sdr):
@@ -240,38 +234,70 @@ def resonances_to_array(resonances):
 # Main sweep
 # ---------------------------------------------------------------------------
 
-def scan_antenna_characteristics(gain=40, output_prefix="/tmp/antenna_scan"):
-    """Run the full characterisation sweep, then run post-sweep analysis."""
+def scan_antenna_characteristics(gain=40, output_prefix="/tmp/antenna_scan",
+                                  freq_min=None, freq_max=None, num_points=None):
+    """Run the full characterisation sweep, then run post-sweep analysis.
+    
+    Args:
+        gain: RF gain in dB
+        output_prefix: Path prefix for output files
+        freq_min: Minimum frequency in Hz (default: FREQ_MIN constant)
+        freq_max: Maximum frequency in Hz (default: FREQ_MAX constant)
+        num_points: Number of measurement points (default: NUM_POINTS constant)
+    """
+    
+    # Use defaults if not specified
+    if freq_min is None:
+        freq_min = FREQ_MIN
+    if freq_max is None:
+        freq_max = FREQ_MAX
+    if num_points is None:
+        num_points = NUM_POINTS
 
     print("RTL-SDR ANTENNA CHARACTERIZATION")
     print("Gain: {} dB".format(gain))
+    print("Frequency range: {:.3f} - {:.3f} MHz".format(freq_min/1e6, freq_max/1e6))
+    print("Measurement points: {}".format(num_points))
 
-    # --- SDR init ------------------------------------------------------------
-    try:
-        sdr = RtlSdr()
-    except Exception as e:
-        print("ERROR: Cannot open RTL-SDR device: {}".format(e))
+    # --- SDR init (with retry) -----------------------------------------------
+    # The RTL-SDR USB driver can take a moment to fully release after a prior
+    # session (e.g. the wide scan) closes.  Retry up to 5 times with a short
+    # delay before giving up.
+    sdr = None
+    for attempt in range(5):
+        try:
+            sdr = RtlSdr()
+            sdr.sample_rate     = SAMPLE_RATE
+            sdr.freq_correction = 60   # PPM
+            sdr.gain            = gain
+            _ = sdr.read_samples(2048)  # discard initial noisy samples
+            break  # success
+        except Exception as e:
+            print("SDR init attempt {}/5 failed: {}".format(attempt + 1, e))
+            if sdr is not None:
+                try:
+                    sdr.close()
+                except Exception:
+                    pass
+                sdr = None
+            time.sleep(1.0)
+
+    if sdr is None:
+        print("ERROR: Cannot open RTL-SDR device after 5 attempts")
         sys.exit(1)
-
-    sdr.sample_rate     = SAMPLE_RATE
-    sdr.freq_correction = 60   # PPM
-    sdr.gain            = gain
 
     print("Sample rate: {:.1f} MHz".format(sdr.sample_rate / 1e6))
     print("Actual gain: {} dB".format(sdr.gain))
 
-    # Discard initial noisy samples after tuner warm-up
-    _ = sdr.read_samples(2048)
-
     # --- Frequency grid ------------------------------------------------------
     test_frequencies = np.logspace(
-        np.log10(FREQ_MIN),
-        np.log10(FREQ_MAX),
-        num=NUM_POINTS
+        np.log10(freq_min),
+        np.log10(freq_max),
+        num=num_points
     )
 
     print("Testing {} frequency points ({:.1f} - {:.1f} MHz)".format(
-        NUM_POINTS, FREQ_MIN / 1e6, FREQ_MAX / 1e6))
+        num_points, freq_min / 1e6, freq_max / 1e6))
 
     # --- Sweep ---------------------------------------------------------------
     frequencies    = []
@@ -281,11 +307,6 @@ def scan_antenna_characteristics(gain=40, output_prefix="/tmp/antenna_scan"):
 
     for i, center_freq in enumerate(test_frequencies):
         safe_freq = int(np.clip(center_freq, 50e6, 2.2e9))
-
-        if is_skipped(safe_freq):
-            print("SKIP: {:.1f} MHz (known problematic range)".format(safe_freq / 1e6))
-            skipped.append(float(safe_freq))
-            continue
 
         try:
             sdr.center_freq = safe_freq
@@ -306,9 +327,15 @@ def scan_antenna_characteristics(gain=40, output_prefix="/tmp/antenna_scan"):
             np.save(output_prefix + "_dynamic_ranges.npy",  np.array(dynamic_ranges))
 
         except OSError as e:
-            print("USB ERROR at {:.1f} MHz - stopping scan".format(safe_freq / 1e6))
+            # USB/device errors (e.g. tuner hiccup at certain frequencies) —
+            # log and skip this point rather than aborting the entire scan.
+            # A true device disconnect will surface again on the next iteration
+            # and quickly exhaust all points, ending naturally.
+            print("USB ERROR at {:.1f} MHz - skipping point".format(safe_freq / 1e6))
             print("  {}".format(e))
-            break
+            skipped.append(float(safe_freq))
+            time.sleep(0.1)  # brief pause to let the tuner recover
+            continue
         except Exception as e:
             print("ERROR at {:.1f} MHz: {}".format(safe_freq / 1e6, e))
             skipped.append(float(safe_freq))
@@ -368,15 +395,69 @@ def scan_antenna_characteristics(gain=40, output_prefix="/tmp/antenna_scan"):
 
 
 def main():
-    gain = 40
-    if len(sys.argv) > 1:
-        try:
-            gain = int(sys.argv[1])
-        except ValueError:
-            print("Error: Gain must be an integer")
-            sys.exit(1)
-
-    scan_antenna_characteristics(gain=gain)
+    import argparse
+    parser = argparse.ArgumentParser(
+        description='RTL-SDR Antenna Characterization Scanner'
+    )
+    parser.add_argument(
+        'gain',
+        type=int,
+        nargs='?',
+        default=40,
+        help='RF gain in dB (default: 40)'
+    )
+    parser.add_argument(
+        '--freq-min',
+        type=float,
+        default=None,
+        help='Minimum frequency in Hz (default: 60 MHz for wide scan)'
+    )
+    parser.add_argument(
+        '--freq-max',
+        type=float,
+        default=None,
+        help='Maximum frequency in Hz (default: 1.76 GHz for wide scan)'
+    )
+    parser.add_argument(
+        '--num-points',
+        type=int,
+        default=None,
+        help='Number of measurement points (default: 60 for wide, 200 for targeted)'
+    )
+    parser.add_argument(
+        '--output-prefix',
+        type=str,
+        default='/tmp/antenna_scan',
+        help='Output file prefix (default: /tmp/antenna_scan)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Determine if this is a targeted scan
+    is_targeted = args.freq_min is not None or args.freq_max is not None
+    
+    if is_targeted:
+        freq_min = args.freq_min if args.freq_min else 60e6
+        freq_max = args.freq_max if args.freq_max else 1.76e9
+        num_points = args.num_points if args.num_points else 200  # High density for targeted
+        print("TARGETED SCAN MODE")
+        print("  Range: {:.3f} - {:.3f} MHz".format(freq_min/1e6, freq_max/1e6))
+        print("  Points: {} (high density)".format(num_points))
+    else:
+        freq_min = 60e6
+        freq_max = 1.76e9
+        num_points = args.num_points if args.num_points else 60
+        print("WIDE SCAN MODE")
+        print("  Range: {:.3f} - {:.3f} MHz".format(freq_min/1e6, freq_max/1e6))
+        print("  Points: {}".format(num_points))
+    
+    scan_antenna_characteristics(
+        gain=args.gain,
+        output_prefix=args.output_prefix,
+        freq_min=freq_min,
+        freq_max=freq_max,
+        num_points=num_points,
+    )
 
 
 if __name__ == '__main__':
