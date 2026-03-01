@@ -55,7 +55,7 @@ class LcarsDemodulator(LcarsWidget):
         """
         # Weather Radio (NOAA): 162.400 - 162.550 MHz
         # Uses narrow-band FM with WIDER deviation than typical NBFM
-        # NOAA actual bandwidth: ~16 kHz audio, ±5 kHz deviation = ~25 kHz total
+        # NOAA actual bandwidth: ~16 kHz audio, Â±5 kHz deviation = ~25 kHz total
         # But works better with 30-40 kHz filter to capture full signal
         if 162.0 <= freq_mhz <= 163.0:
             base_params = {
@@ -114,13 +114,16 @@ class LcarsDemodulator(LcarsWidget):
         
         # Aviation: 118-137 MHz
         # Uses AM (Amplitude Modulation)
+        # AM demodulation in rtl_fm works better with a higher sample rate —
+        # 48 kHz gives the demodulator enough headroom above the 8 kHz audio
+        # bandwidth for clean envelope detection.
         elif 118.0 <= freq_mhz <= 137.0:
             base_params = {
                 'mode': 'am',
-                'sample_rate': 12000,
+                'sample_rate': 48000,   # 48 kHz: AM needs headroom above audio BW
                 'bandwidth': 10000,
                 'min_bandwidth': 8000,
-                'gain': None,
+                'gain': 40,             # Fixed gain: AGC fights AM envelope detection
                 'squelch': 0,
                 'mode_name': 'AM (Aviation)',
                 'band_name': 'Aviation Band',
@@ -350,13 +353,14 @@ class LcarsDemodulator(LcarsWidget):
         
         return lines
     
-    def start_demodulation(self, frequency_hz, filter_width_hz=None):
+    def start_demodulation(self, frequency_hz, filter_width_hz=None, force_mode=None):
         """
-        Start FM/AM demodulation at the specified frequency with optional filter width
+        Start FM/AM demodulation at the specified frequency with optional filter width.
         
         Args:
-            frequency_hz: Frequency in Hz (will be converted to MHz internally)
+            frequency_hz:    Frequency in Hz
             filter_width_hz: Filter width in Hz (from waterfall), or None for auto
+            force_mode:      Override band mode: 'am', 'fm', or 'wbfm'. None = auto.
         """
         # Stop any existing demodulation first
         self.stop_demodulation()
@@ -367,6 +371,17 @@ class LcarsDemodulator(LcarsWidget):
         # Get optimal parameters for this frequency (with filter width override)
         demod_params = self.get_demodulation_params(freq_mhz, filter_width_hz)
         
+        # Apply forced mode override if requested
+        if force_mode in ('am', 'fm', 'wbfm'):
+            demod_params['mode'] = force_mode
+            labels = {'am': 'AM (Manual)', 'fm': 'NBFM (Manual)', 'wbfm': 'WBFM (Manual)'}
+            demod_params['mode_name'] = labels[force_mode]
+            if force_mode == 'wbfm':
+                demod_params['sample_rate'] = max(demod_params['sample_rate'], 200000)
+                demod_params['bandwidth']   = max(demod_params['bandwidth'], 150000)
+            elif force_mode == 'am':
+                demod_params['sample_rate'] = max(demod_params['sample_rate'], 48000)
+
         # Store current bandwidth
         self.current_bandwidth = demod_params['bandwidth']
         
@@ -445,7 +460,7 @@ class LcarsDemodulator(LcarsWidget):
         if self.tuned_in:
             self.process_manager.kill_process('demodulator')
         
-        # Always clear state unconditionally — if kill_process failed or
+        # Always clear state unconditionally â€” if kill_process failed or
         # the process was already dead, we still need to reset so the next
         # RECORD press takes the start path.
         self.fm_process = None

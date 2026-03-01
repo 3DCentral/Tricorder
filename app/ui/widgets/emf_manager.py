@@ -71,16 +71,33 @@ class LcarsEMFManager:
         
         # --- DEMODULATION MODE SELECTION ---
         # Track which demodulation mode is selected
-        self.selected_demod_mode = 1  # Index into available modes
+        self.selected_demod_mode = 0  # Auto-set when frequency changes
         self.demod_modes = [
             {
-                'name': 'FM Audio',
-                'handler': self._demod_fm_audio
+                'name': 'Auto',
+                'handler': self._demod_fm_audio,
+                'force_mode': None,
+            },
+            {
+                'name': 'AM',
+                'handler': self._demod_force_am,
+                'force_mode': 'am',
+            },
+            {
+                'name': 'FM',
+                'handler': self._demod_force_fm,
+                'force_mode': 'fm',
+            },
+            {
+                'name': 'WBFM',
+                'handler': self._demod_force_wbfm,
+                'force_mode': 'wbfm',
             },
             {
                 'name': 'Pager Decode',
-                'handler': self._demod_pager
-            }
+                'handler': self._demod_pager,
+                'force_mode': None,
+            },
         ]
         
         # Pager decoder state
@@ -88,7 +105,7 @@ class LcarsEMFManager:
         self.pager_active = False
 
     # ---------------------------------------------------------------
-    # Public interface — called by main.py
+    # Public interface â€” called by main.py
     # ---------------------------------------------------------------
 
     def is_active(self):
@@ -140,7 +157,7 @@ class LcarsEMFManager:
 
     def hide(self):
         """Hide all EMF widgets. Called when switching away from EMF mode."""
-        # Stop any running subprocesses before hiding — otherwise the SDR
+        # Stop any running subprocesses before hiding â€” otherwise the SDR
         # device stays locked by a waterfall or demodulator process.
         if self.waterfall_display.scan_active:
             self.waterfall_display.stop_scan()
@@ -171,7 +188,7 @@ class LcarsEMFManager:
         self._poll_waterfall()
 
     # ---------------------------------------------------------------
-    # Button handlers — called by main.py's SCAN/ANALYZE/RECORD
+    # Button handlers â€” called by main.py's SCAN/ANALYZE/RECORD
     # ---------------------------------------------------------------
 
     def handle_scan(self):
@@ -179,13 +196,13 @@ class LcarsEMFManager:
         if not self.is_active():
             return False
 
-        # Waterfall visible → back to frequency selector
+        # Waterfall visible â†’ back to frequency selector
         if self.waterfall_display.visible:
-            # Clean up any live subprocess before hiding — otherwise the SDR
+            # Clean up any live subprocess before hiding â€” otherwise the SDR
             # device stays locked and the next ANALYZE can't restart it.
             if self.waterfall_display.scan_active:
                 self.waterfall_display.stop_scan()
-            # Same for the demodulator: after the SCAN→ANALYZE→RECORD flow the
+            # Same for the demodulator: after the SCANâ†’ANALYZEâ†’RECORD flow the
             # demod holds the SDR; if the user hits SCAN without toggling
             # ANALYZE off first we need to release it here.
             if self.demodulator.is_active():
@@ -200,7 +217,7 @@ class LcarsEMFManager:
                 self.spectrum_scan_display.visible = False
             return True
 
-        # Antenna analysis visible → switch to frequency selector
+        # Antenna analysis visible â†’ switch to frequency selector
         if self.antenna_analysis.visible:
             print("Switching to frequency selector mode")
             self.antenna_analysis.visible = False
@@ -246,7 +263,7 @@ class LcarsEMFManager:
                 print("Select a target frequency on the scale above")
             return True
 
-        # Static EMF gadget visible → switch to frequency selector
+        # Static EMF gadget visible â†’ switch to frequency selector
         if self.emf_gadget.visible:
             self.emf_gadget.visible = False
             self.frequency_selector.visible = True
@@ -256,7 +273,7 @@ class LcarsEMFManager:
             print("Select a target frequency on the scale above")
             return True
 
-        # Frequency selector or spectrum display visible → start scan
+        # Frequency selector or spectrum display visible â†’ start scan
         if self.frequency_selector.visible or self.spectrum_scan_display.visible:
             self._start_spectrum_scan()
             return True
@@ -274,7 +291,7 @@ class LcarsEMFManager:
         # "no selected frequency" anyway.
         if self.antenna_analysis.visible:
             if not self.antenna_analysis.scan_complete:
-                print("Antenna scan still in progress — wait for it to finish")
+                print("Antenna scan still in progress â€” wait for it to finish")
                 return True
 
             band = self.antenna_analysis.get_selected_band()
@@ -282,20 +299,20 @@ class LcarsEMFManager:
                 print("Select a band of interest first (tap on the graph or the list)")
                 return True
 
-            # Band is selected and scan is complete — launch targeted high-density sweep
+            # Band is selected and scan is complete â€” launch targeted high-density sweep
             start_freq_hz = int(band['start'] * 1e6)
             end_freq_hz   = int(band['end']   * 1e6)
             
             # For narrow bands (< 10 MHz) use very high density; wider bands scale down
             bandwidth_mhz = band['end'] - band['start']
             if bandwidth_mhz <= 4:
-                num_points = 200   # 2m ham (4 MHz) → 200 points = 0.02 MHz spacing
+                num_points = 200   # 2m ham (4 MHz) â†’ 200 points = 0.02 MHz spacing
             elif bandwidth_mhz <= 10:
                 num_points = 150
             elif bandwidth_mhz <= 30:
                 num_points = 100
             else:
-                num_points = 80    # 70cm (30 MHz) → 80 points
+                num_points = 80    # 70cm (30 MHz) â†’ 80 points
             
             print("Launching targeted sweep:")
             print("  Band: {}".format(band['name']))
@@ -427,12 +444,40 @@ class LcarsEMFManager:
             if self.waterfall_display.visible:
                 print("Live waterfall paused during demodulation")
 
+    def _demod_force_am(self, target_freq_hz):
+        self._demod_audio_with_mode(target_freq_hz, force_mode='am')
+
+    def _demod_force_fm(self, target_freq_hz):
+        self._demod_audio_with_mode(target_freq_hz, force_mode='fm')
+
+    def _demod_force_wbfm(self, target_freq_hz):
+        self._demod_audio_with_mode(target_freq_hz, force_mode='wbfm')
+
+    def _demod_audio_with_mode(self, target_freq_hz, force_mode=None):
+        """Start/stop audio demodulation with optional mode override."""
+        filter_width = None
+        if self.waterfall_display.visible:
+            filter_width = self.waterfall_display.get_filter_width()
+
+        if self.demodulator.is_active():
+            self.demodulator.stop_demodulation()
+            self._update_demod_info(target_freq_hz)
+            if self.waterfall_display.visible and not self.waterfall_display.scan_active:
+                sleep(0.5)
+                restart_freq = (self.waterfall_display.center_frequency
+                                or target_freq_hz)
+                self.waterfall_display.start_scan(restart_freq)
+        else:
+            self.demodulator.start_demodulation(target_freq_hz, filter_width,
+                                                force_mode=force_mode)
+            self._update_demod_info(target_freq_hz)
+
     def handle_click(self, event):
         """Handle mouse click while EMF is active. Returns True if consumed."""
         if not self.is_active():
             return False
 
-        # Waterfall click → select frequency
+        # Waterfall click â†’ select frequency
         if self.waterfall_display.visible and self.waterfall_display.rect.collidepoint(event.pos):
             x_rel = event.pos[0] - self.waterfall_display.rect.left
             frequency = self.waterfall_display.get_frequency_from_x(x_rel)
@@ -443,7 +488,7 @@ class LcarsEMFManager:
                 self._update_demod_info(frequency)
             return True
 
-        # Spectrum scan display click → select frequency + update preview
+        # Spectrum scan display click â†’ select frequency + update preview
         if self.spectrum_scan_display.visible and self.spectrum_scan_display.rect.collidepoint(event.pos):
             if self.spectrum_scan_display.selected_frequency:
                 target_freq = self.spectrum_scan_display.selected_frequency
@@ -451,7 +496,7 @@ class LcarsEMFManager:
                 self._update_demod_info(target_freq)
             return True
 
-        # Frequency selector click → select frequency + update preview
+        # Frequency selector click â†’ select frequency + update preview
         if self.frequency_selector.visible and self.frequency_selector.rect.collidepoint(event.pos):
             if hasattr(self.frequency_selector, 'selected_frequency') and self.frequency_selector.selected_frequency:
                 target_freq = self.frequency_selector.selected_frequency
@@ -459,11 +504,11 @@ class LcarsEMFManager:
                 self._update_demod_info(target_freq)
             return True
 
-        # Antenna analysis click → band selection (only after scan is complete)
+        # Antenna analysis click â†’ band selection (only after scan is complete)
         if self.antenna_analysis.visible and self.antenna_analysis.scan_complete:
             if self.antenna_analysis.rect.collidepoint(event.pos):
                 if self.antenna_analysis.handle_graph_click(*event.pos):
-                    # Selection changed — refresh the TextDisplay highlight
+                    # Selection changed â€” refresh the TextDisplay highlight
                     # to stay in sync with whatever the graph just toggled.
                     self._sync_text_display_selection()
                 return True   # click was inside the widget; consume it either way
@@ -477,9 +522,9 @@ class LcarsEMFManager:
             self.waterfall_display.adjust_filter_width(1)
             return True
 
-        # Frequency selector: increase sweep range
-        if self.frequency_selector.visible and self.frequency_selector.selected_frequency:
-            if self.frequency_selector.adjust_sweep_steps(1):
+        # Frequency selector: zoom IN around selected frequency
+        if self.frequency_selector.visible:
+            if self.frequency_selector.zoom_in():
                 self._sync_sweep_range_display()
             return True
 
@@ -492,9 +537,9 @@ class LcarsEMFManager:
             self.waterfall_display.adjust_filter_width(-1)
             return True
 
-        # Frequency selector: decrease sweep range
-        if self.frequency_selector.visible and self.frequency_selector.selected_frequency:
-            if self.frequency_selector.adjust_sweep_steps(-1):
+        # Frequency selector: zoom OUT
+        if self.frequency_selector.visible:
+            if self.frequency_selector.zoom_out():
                 self._sync_sweep_range_display()
             return True
 
@@ -505,6 +550,13 @@ class LcarsEMFManager:
         if self.waterfall_display.visible and self.waterfall_display.scan_active:
             self.waterfall_display.adjust_frequency(-1)
             return True
+
+        # Frequency selector: decrease number of sweeps
+        if self.frequency_selector.visible and self.frequency_selector.selected_frequency:
+            if self.frequency_selector.adjust_sweep_steps(-1):
+                self._sync_sweep_range_display()
+            return True
+
         return False
 
     def handle_nav_right(self):
@@ -512,6 +564,13 @@ class LcarsEMFManager:
         if self.waterfall_display.visible and self.waterfall_display.scan_active:
             self.waterfall_display.adjust_frequency(1)
             return True
+
+        # Frequency selector: increase number of sweeps
+        if self.frequency_selector.visible and self.frequency_selector.selected_frequency:
+            if self.frequency_selector.adjust_sweep_steps(1):
+                self._sync_sweep_range_display()
+            return True
+
         return False
 
     # Called by satellite tracker jump (from analyzeHandler)
@@ -566,7 +625,7 @@ class LcarsEMFManager:
 
                 self.antenna_analysis.complete_scan()
 
-                # Scan is done — replace the demod placeholder in the TextDisplay
+                # Scan is done â€” replace the demod placeholder in the TextDisplay
                 # with the list of known bands that the user can now select.
                 if not scan_was_targeted:
                     # Only show band list after wide scan completes
@@ -714,7 +773,7 @@ class LcarsEMFManager:
                 pass
 
     # ---------------------------------------------------------------
-    # Band-selection bridge (antenna characterization ↔ TextDisplay)
+    # Band-selection bridge (antenna characterization â†” TextDisplay)
     # ---------------------------------------------------------------
 
     def handle_text_display_selection(self, selected_index):
@@ -879,16 +938,21 @@ class LcarsEMFManager:
 
     def _update_scan_range_preview(self, target_freq):
         """Compute and display the scan range that SCAN would use for a given frequency."""
-        bandwidth = 10e6
-        start_freq = max(int(50e6), int(target_freq - bandwidth / 2))
-        end_freq = min(int(2.2e9), int(target_freq + bandwidth / 2))
-
         if self.frequency_selector.visible:
+            # set_selected_frequency already recomputes scanning_range from
+            # the current sweep_steps — don't overwrite it with a fixed width.
             self.frequency_selector.set_selected_frequency(target_freq)
-            self.frequency_selector.set_scanning_range(start_freq, end_freq)
+
+        sweep_range = self.frequency_selector.get_sweep_range()
+        if sweep_range:
+            start_freq, end_freq = sweep_range
+        else:
+            bandwidth = 10e6
+            start_freq = max(int(50e6), int(target_freq - bandwidth / 2))
+            end_freq   = min(int(2.2e9), int(target_freq + bandwidth / 2))
 
         self.current_scan_start_freq = start_freq
-        self.current_scan_end_freq = end_freq
+        self.current_scan_end_freq   = end_freq
 
         print("Selected {:.3f} MHz - Will scan {:.3f} to {:.3f} MHz".format(
             target_freq / 1e6, start_freq / 1e6, end_freq / 1e6))
@@ -910,6 +974,22 @@ class LcarsEMFManager:
         if self.waterfall_display.visible:
             filter_width = self.waterfall_display.get_filter_width()
             
+            # Auto-select mode based on band's recommended demod
+            try:
+                from bands import get_band_for_freq_hz
+                band = get_band_for_freq_hz(frequency_hz)
+                band_mode = band.get('demod_mode', 'fm') if band else 'fm'
+            except Exception:
+                band_mode = 'fm'
+            mode_name_map = {'am': 'AM', 'fm': 'FM', 'wbfm': 'WBFM'}
+            suggested = mode_name_map.get(band_mode, 'Auto')
+            # Only auto-switch if currently on Auto
+            if self.demod_modes[self.selected_demod_mode]['name'] == 'Auto':
+                for i, m in enumerate(self.demod_modes):
+                    if m['name'] == suggested:
+                        self.selected_demod_mode = i
+                        break
+
             # Build simplified mode selector display
             lines = []
             

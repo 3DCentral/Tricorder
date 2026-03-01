@@ -5,6 +5,8 @@ CHANGES FROM ORIGINAL:
 - Added filter width control (up/down arrows)
 - Filter width affects the visual bandwidth indicator
 - Filter width is independent of SDR sample rate
+- Band name indicator: shows the current band name in the PSD area header
+  (sourced from the central bands.py registry)
 """
 import pygame
 import numpy as np
@@ -42,6 +44,7 @@ class LcarsWaterfall(LcarsWidget):
     Shows a scrolling 2D spectrogram with PSD overlay
     
     NEW: Filter width control for precise frequency tuning
+    NEW: Band name indicator in PSD header area
     """
     
     def __init__(self, pos, size=(640, 480)):
@@ -90,7 +93,7 @@ class LcarsWaterfall(LcarsWidget):
         self.current_bandwidth = 2400000  # 2.4 MHz default
         self.center_frequency = None
         
-        # NEW: Filter width control (for demodulation/listening bandwidth)
+        # Filter width control (for demodulation/listening bandwidth)
         # This is separate from SDR bandwidth and controls how wide a frequency
         # range we're trying to tune in to
         self.filter_width_options = [
@@ -116,6 +119,12 @@ class LcarsWaterfall(LcarsWidget):
         
         # Signal snapping state
         self.selection_snap_type = None  # 'peak', 'centroid', 'rounded', or None
+
+        # Pre-load font for band label (avoid per-frame font construction)
+        try:
+            self._font_band_label = pygame.font.Font("assets/swiss911.ttf", 15)
+        except Exception:
+            self._font_band_label = pygame.font.SysFont('monospace', 15)
     
     def stop_scan(self):
         """Stop the waterfall scan"""
@@ -176,15 +185,12 @@ class LcarsWaterfall(LcarsWidget):
         Args:
             direction: 1 for increase, -1 for decrease
         """
-        # Adjust filter width index
         self.filter_width_index += direction
         self.filter_width_index = max(0, min(len(self.filter_width_options) - 1, 
                                              self.filter_width_index))
         
-        # Update filter width
         self.filter_width = self.filter_width_options[self.filter_width_index]
         
-        # Print status
         print("\n" + "="*60)
         print("FILTER WIDTH ADJUSTMENT")
         print("="*60)
@@ -210,20 +216,17 @@ class LcarsWaterfall(LcarsWidget):
         if not self.scan_active:
             return
         
-        # Get current center frequency
         center_freq = self.center_frequency if self.center_frequency else self.selected_frequency
         if not center_freq:
             print("No center frequency set")
             return
         
-        # Step size is 10% of SDR bandwidth (not filter width!)
         freq_step = self.current_bandwidth * 0.1
         center_freq += (direction * freq_step)
         
-        # Clamp to SDR range (24 MHz to 1.766 GHz for RTL-SDR)
+        # Clamp to SDR range
         center_freq = max(24e6, min(1766e6, center_freq))
         
-        # Print status
         print("\n" + "="*60)
         print("FREQUENCY ADJUSTMENT")
         print("="*60)
@@ -234,50 +237,29 @@ class LcarsWaterfall(LcarsWidget):
             (center_freq + self.current_bandwidth/2) / 1e6))
         print("="*60 + "\n")
         
-        # Restart with new frequency
         self.start_scan(center_freq, self.current_bandwidth)
     
     def get_filter_width(self):
-        """Get current filter width in Hz
-        
-        Returns:
-            int: Filter width in Hz
-        """
+        """Get current filter width in Hz"""
         return self.filter_width
     
     def _generate_colormap(self, num_colors=256):
         """Generate a color map for waterfall display"""
         colormap = []
         
-        # Create gradient: dark blue -> blue -> cyan -> green -> yellow -> red
         for i in range(num_colors):
             ratio = i / float(num_colors - 1)
             
             if ratio < 0.2:
-                # Dark blue to blue
-                r = 0
-                g = 0
-                b = int(255 * (ratio / 0.2))
+                r = 0; g = 0; b = int(255 * (ratio / 0.2))
             elif ratio < 0.4:
-                # Blue to cyan
-                r = 0
-                g = int(255 * ((ratio - 0.2) / 0.2))
-                b = 255
+                r = 0; g = int(255 * ((ratio - 0.2) / 0.2)); b = 255
             elif ratio < 0.6:
-                # Cyan to green
-                r = 0
-                g = 255
-                b = int(255 * (1 - (ratio - 0.4) / 0.2))
+                r = 0; g = 255; b = int(255 * (1 - (ratio - 0.4) / 0.2))
             elif ratio < 0.8:
-                # Green to yellow
-                r = int(255 * ((ratio - 0.6) / 0.2))
-                g = 255
-                b = 0
+                r = int(255 * ((ratio - 0.6) / 0.2)); g = 255; b = 0
             else:
-                # Yellow to red
-                r = 255
-                g = int(255 * (1 - (ratio - 0.8) / 0.2))
-                b = 0
+                r = 255; g = int(255 * (1 - (ratio - 0.8) / 0.2)); b = 0
             
             colormap.append((r, g, b))
         
@@ -296,29 +278,19 @@ class LcarsWaterfall(LcarsWidget):
         self.psd_data = psd_data
         self.frequencies = frequencies
         
-        # Invalidate cache when data changes
         new_hash = hash(waterfall_data.tobytes()) if waterfall_data is not None else None
         if new_hash != self.data_hash:
             self.cached_waterfall_surface = None
             self.data_hash = new_hash
     
     def get_frequency_from_x(self, x_pos):
-        """Convert X pixel position to frequency
-        
-        Args:
-            x_pos: X position relative to widget (0 to display_width)
-            
-        Returns:
-            Frequency in Hz, or None if no frequency data available
-        """
+        """Convert X pixel position to frequency"""
         if self.frequencies is None or len(self.frequencies) == 0:
             return None
         
-        # Calculate ratio along the display
         ratio = float(x_pos) / self.display_width
-        ratio = max(0.0, min(1.0, ratio))  # Clamp to 0-1
+        ratio = max(0.0, min(1.0, ratio))
         
-        # Map to frequency range
         freq_min = self.frequencies[0]
         freq_max = self.frequencies[-1]
         frequency = freq_min + ratio * (freq_max - freq_min)
@@ -326,16 +298,10 @@ class LcarsWaterfall(LcarsWidget):
         return frequency
     
     def set_selected_frequency(self, frequency, apply_snapping=True):
-        """Set the selected target frequency with optional signal-aware snapping
-        
-        Args:
-            frequency: Frequency in Hz
-            apply_snapping: If True, snap to detected signals (default: True)
-        """
+        """Set the selected target frequency with optional signal-aware snapping"""
         if self.frequencies is None:
             return
         
-        # Apply signal-aware snapping
         if apply_snapping and self.waterfall_data is not None:
             snapped_freq, snap_type = self._find_signal_at_frequency(frequency)
             
@@ -343,8 +309,7 @@ class LcarsWaterfall(LcarsWidget):
                 self.selection_snap_type = snap_type
                 frequency = snapped_freq
                 
-                # Log the snap if significant
-                if abs(snapped_freq - frequency) > 1000:  # > 1 kHz
+                if abs(snapped_freq - frequency) > 1000:
                     print("  Snapped from {:.4f} MHz to {:.3f} MHz ({})".format(
                         frequency / 1e6, snapped_freq / 1e6, snap_type))
             else:
@@ -354,32 +319,18 @@ class LcarsWaterfall(LcarsWidget):
         
         self.selected_frequency = frequency
         
-        # Calculate X position for drawing
         freq_min = self.frequencies[0]
         freq_max = self.frequencies[-1]
         ratio = (frequency - freq_min) / (freq_max - freq_min)
         self.selected_x = int(ratio * self.display_width)
     
     def set_demodulator(self, demodulator):
-        """Set reference to demodulator for bandwidth visualization
-        
-        Args:
-            demodulator: LcarsDemodulator instance
-        """
+        """Set reference to demodulator for bandwidth visualization"""
         self.demodulator = demodulator
     
     def _normalize_to_color_range(self, data, vmin=-90, vmax=40):
-        """
-        Normalize dB values to 0-255 range for color mapping
-        
-        Args:
-            data: Array of dB values
-            vmin: Minimum dB value (maps to 0/blue) - Changed from -70 to -90 for better noise floor
-            vmax: Maximum dB value (maps to 255/red)
-        """
-        # Clip to range
+        """Normalize dB values to 0-255 range for color mapping"""
         normalized = np.clip(data, vmin, vmax)
-        # Scale to 0-255
         normalized = ((normalized - vmin) / (vmax - vmin) * 255).astype(np.uint8)
         return normalized
     
@@ -388,36 +339,27 @@ class LcarsWaterfall(LcarsWidget):
         if self.waterfall_data is None:
             return
         
-        # Check if we can use cached surface (when paused)
         if self.cached_waterfall_surface is not None and not self.scan_active:
             surface.blit(self.cached_waterfall_surface, (0, self.psd_height))
             return
         
-        # Get dimensions
         num_lines, num_bins = self.waterfall_data.shape
         
-        # OPTIMIZATION: Normalize all data at once using numpy operations
         normalized = self._normalize_to_color_range(self.waterfall_data)
-        
-        # OPTIMIZATION: Use numpy indexing to map all pixels to colors at once
         colored_data = self.colormap_array[normalized]
         
-        # OPTIMIZATION: Create surface from numpy array directly
         waterfall_surface = pygame.surfarray.make_surface(
             np.transpose(colored_data, (1, 0, 2))
         )
         
-        # Scale to fit display
         scaled_waterfall = pygame.transform.scale(
             waterfall_surface, 
             (self.display_width, self.waterfall_height)
         )
         
-        # Cache the surface if scan is paused
         if not self.scan_active:
             self.cached_waterfall_surface = scaled_waterfall
         
-        # Blit to main surface (below PSD area)
         surface.blit(scaled_waterfall, (0, self.psd_height))
     
     def _draw_psd(self, surface):
@@ -425,7 +367,6 @@ class LcarsWaterfall(LcarsWidget):
         if self.psd_data is None:
             return
         
-        # Normalize PSD for display
         psd_min = np.min(self.psd_data)
         psd_max = np.max(self.psd_data)
         psd_range = psd_max - psd_min
@@ -433,10 +374,8 @@ class LcarsWaterfall(LcarsWidget):
         if psd_range == 0:
             return
         
-        # Scale PSD to fit in psd_height
         psd_scaled = ((self.psd_data - psd_min) / psd_range * (self.psd_height - 20)).astype(int)
         
-        # Create points for line plot
         num_points = len(self.psd_data)
         points = []
         for i in range(num_points):
@@ -444,21 +383,104 @@ class LcarsWaterfall(LcarsWidget):
             y = int(self.psd_height - 10 - psd_scaled[i])
             points.append((x, y))
         
-        # Draw background for PSD area
         psd_bg = pygame.Surface((self.display_width, self.psd_height))
         psd_bg.fill((0, 0, 0))
         psd_bg.set_alpha(200)
         surface.blit(psd_bg, (0, 0))
         
-        # Draw grid lines
         for i in range(5):
             y = int(i * self.psd_height / 4)
             pygame.draw.line(surface, (40, 40, 40), (0, y), (self.display_width, y), 1)
         
-        # Draw PSD line
         if len(points) > 1:
             pygame.draw.lines(surface, (255, 255, 0), False, points, 2)
-    
+
+    def _get_visible_bands(self):
+        """
+        Return a list of band dicts that overlap the current visible frequency
+        window.  Handles three cases:
+
+        1. Normal: one band covers (most of) the window.
+        2. Border: the window straddles two (or more) adjacent bands.
+        3. Point allocation: a band whose start == end (e.g. ADS-B at 1090 MHz)
+           is included if it falls inside the window.
+
+        Uses self.frequencies[] if available, otherwise falls back to
+        center_frequency ± current_bandwidth/2.
+
+        Returns:
+            list of band dicts (may be empty), ordered by start frequency.
+        """
+        from bands import BANDS
+
+        if self.frequencies is not None and len(self.frequencies) >= 2:
+            freq_min_hz = self.frequencies[0]
+            freq_max_hz = self.frequencies[-1]
+        elif self.center_frequency is not None:
+            freq_min_hz = self.center_frequency - self.current_bandwidth / 2
+            freq_max_hz = self.center_frequency + self.current_bandwidth / 2
+        else:
+            return []
+
+        freq_min_mhz = freq_min_hz / 1e6
+        freq_max_mhz = freq_max_hz / 1e6
+
+        visible = []
+        for band in BANDS:
+            # Point allocation: include if it falls inside the window
+            if band['start'] == band['end']:
+                if freq_min_mhz <= band['start'] <= freq_max_mhz:
+                    visible.append(band)
+            else:
+                # Overlap test: band and window must share at least one point
+                if band['start'] <= freq_max_mhz and band['end'] >= freq_min_mhz:
+                    visible.append(band)
+
+        return visible
+
+    def _draw_band_header(self, surface):
+        """
+        Draw a yellow band-name row at the very top of the display (y=0),
+        above the PSD graph.
+
+        - Single band visible  → "FM Broadcast Radio"
+        - Two bands visible    → "FM Broadcast Radio  |  Aviation Band"
+        - Point allocation     → "ADS-B Aircraft Tracking  (1090 MHz)"
+        - No band              → nothing drawn
+        """
+        bands = self._get_visible_bands()
+        if not bands:
+            return
+
+        parts = []
+        for band in bands:
+            if band['start'] == band['end']:
+                # Point allocation — show the exact frequency
+                parts.append("{} ({:.0f} MHz)".format(
+                    band['full_name'], band['start']))
+            else:
+                parts.append(band['full_name'])
+
+        label = "  |  ".join(parts)
+
+        text = self._font_band_label.render(label, True, (255, 255, 0))
+        # Centre horizontally, sit right at y=2
+        text_rect = text.get_rect(centerx=self.display_width // 2, top=2)
+
+        # Thin black backing for legibility over the graph background
+        padding = 3
+        bg_rect = pygame.Rect(
+            text_rect.x - padding,
+            text_rect.y - padding,
+            text_rect.width + padding * 2,
+            text_rect.height + padding * 2,
+        )
+        bg_surf = pygame.Surface((bg_rect.width, bg_rect.height))
+        bg_surf.set_alpha(160)
+        bg_surf.fill((0, 0, 0))
+        surface.blit(bg_surf, bg_rect)
+        surface.blit(text, text_rect)
+
     def _draw_frequency_labels(self, surface):
         """Draw frequency labels at bottom"""
         if self.frequencies is None:
@@ -466,21 +488,17 @@ class LcarsWaterfall(LcarsWidget):
         
         font = pygame.font.Font("assets/swiss911.ttf", 24)
         
-        # Draw min, center, max frequencies
-        freq_min = self.frequencies[0] / 1e6  # Convert to MHz
+        freq_min = self.frequencies[0] / 1e6
         freq_max = self.frequencies[-1] / 1e6
         freq_center = (freq_min + freq_max) / 2
         
-        # Min frequency (left)
         text = font.render("{:.2f} MHz".format(freq_min), True, (255, 153, 0))
         surface.blit(text, (5, self.display_height - 30))
         
-        # Center frequency (middle)
         text = font.render("{:.2f} MHz".format(freq_center), True, (255, 153, 0))
         text_rect = text.get_rect(center=(self.display_width // 2, self.display_height - 15))
         surface.blit(text, text_rect)
         
-        # Max frequency (right)
         text = font.render("{:.2f} MHz".format(freq_max), True, (255, 153, 0))
         text_rect = text.get_rect(right=self.display_width - 5, top=self.display_height - 30)
         surface.blit(text, text_rect)
@@ -490,7 +508,6 @@ class LcarsWaterfall(LcarsWidget):
         if self.selected_x is None or self.selected_frequency is None:
             return
         
-        # Choose color based on snap type
         if self.selection_snap_type == 'peak':
             color = SNAP_CONFIG['color_peak']
         elif self.selection_snap_type == 'centroid':
@@ -498,46 +515,37 @@ class LcarsWaterfall(LcarsWidget):
         elif self.selection_snap_type == 'rounded':
             color = SNAP_CONFIG['color_rounded']
         else:
-            color = SNAP_CONFIG['color_manual']  # Purple - no snapping
+            color = SNAP_CONFIG['color_manual']
         
-        # Use filter width (not demodulator bandwidth)
         filter_bandwidth_hz = self.filter_width
         
-        # Draw bandwidth rectangle showing filter width
         if filter_bandwidth_hz and self.frequencies is not None:
             freq_min = self.frequencies[0]
             freq_max = self.frequencies[-1]
             freq_range = freq_max - freq_min
             
-            # Calculate bandwidth in pixels
             bandwidth_ratio = filter_bandwidth_hz / freq_range
             bandwidth_pixels = int(bandwidth_ratio * self.display_width)
             
-            # Calculate left and right edges of bandwidth box
             x_left = max(0, self.selected_x - bandwidth_pixels // 2)
             x_right = min(self.display_width, self.selected_x + bandwidth_pixels // 2)
             box_width = x_right - x_left
             
-            # Draw semi-transparent bandwidth box
             box_height = self.display_height - self.psd_height - 40
             if box_width > 0:
-                # Create semi-transparent overlay
                 bandwidth_surface = pygame.Surface((box_width, box_height))
                 bandwidth_surface.set_alpha(60)
                 bandwidth_surface.fill(color)
                 surface.blit(bandwidth_surface, (x_left, self.psd_height))
                 
-                # Draw border of bandwidth box
                 pygame.draw.rect(surface, color, 
                                (x_left, self.psd_height, box_width, box_height), 2)
         
-        # Draw vertical line through ENTIRE display (including PSD area)
         pygame.draw.line(surface, color, 
                         (self.selected_x, 0),
                         (self.selected_x, self.display_height - 40), 
                         3)
         
-        # Draw crosshair at top
         crosshair_y = self.psd_height + 20
         pygame.draw.line(surface, color,
                         (self.selected_x - 10, crosshair_y),
@@ -546,32 +554,34 @@ class LcarsWaterfall(LcarsWidget):
                         (self.selected_x, crosshair_y - 10),
                         (self.selected_x, crosshair_y + 10), 2)
         
-        # Draw frequency label with snap type indicator
         font = pygame.font.Font("assets/swiss911.ttf", 20)
         freq_mhz = self.selected_frequency / 1e6
         
-        # Build label with filter width and snap indicator
         if filter_bandwidth_hz >= 1000:
             bw_text = "{:.1f} kHz".format(filter_bandwidth_hz / 1000)
         else:
             bw_text = "{:.0f} Hz".format(filter_bandwidth_hz)
         
-        # Add snap type indicator
         if self.selection_snap_type == 'peak':
-            snap_indicator = " ."  # Locked on peak
+            snap_indicator = " ."
         elif self.selection_snap_type == 'centroid':
-            snap_indicator = " O"  # Locked on wide signal
+            snap_indicator = " O"
         elif self.selection_snap_type == 'rounded':
-            snap_indicator = " ~"   # Rounded
+            snap_indicator = " ~"
         else:
-            snap_indicator = ""     # Manual
+            snap_indicator = ""
         
-        label_text = "{:.3f} MHz ({}){} ".format(freq_mhz, bw_text, snap_indicator)
+        # Also append band short name next to the frequency label
+        from bands import get_band_for_freq_hz
+        band = get_band_for_freq_hz(self.selected_frequency)
+        band_tag = "  [{}]".format(band['name']) if band else ""
+
+        label_text = "{:.3f} MHz ({}){}{} ".format(
+            freq_mhz, bw_text, snap_indicator, band_tag)
         
         text = font.render(label_text, True, color)
         text_rect = text.get_rect(center=(self.selected_x, crosshair_y + 30))
         
-        # Draw background for text
         padding = 5
         bg_rect = pygame.Rect(
             text_rect.x - padding,
@@ -591,114 +601,60 @@ class LcarsWaterfall(LcarsWidget):
         if not self.visible:
             return
         
-        # OPTIMIZATION: Only re-renders when data changes or scan is active
         needs_redraw = self.scan_active or self.cached_waterfall_surface is None
         
         if needs_redraw:
-            # Clear surface
             self.image.fill((0, 0, 0))
             
-            # Draw components
             self._draw_waterfall(self.image)
             self._draw_psd(self.image)
+            self._draw_band_header(self.image)      # band name(s) above PSD
             self._draw_frequency_selector(self.image)
             self._draw_frequency_labels(self.image)
         
-        # Always blit to screen
         screen.blit(self.image, self.rect)
-        
         self.dirty = 0
         
     def _compute_noise_floor(self, psd_data):
-        """
-        Compute noise floor across entire spectrum
-        
-        Args:
-            psd_data: 1D or 2D array of PSD values in dB
-            
-        Returns:
-            float: Noise floor estimate in dB
-        """
-        # Use median as robust noise floor estimate
-        # (mean would be pulled up by signals)
+        """Compute noise floor across entire spectrum"""
         return np.median(psd_data)
 
-
     def _find_local_peaks(self, signal_1d, threshold_db):
-        """
-        Find local maxima in 1D signal that exceed threshold
-        
-        Args:
-            signal_1d: 1D array of signal values in dB
-            threshold_db: Minimum value to be considered a peak
-            
-        Returns:
-            list: Indices of peaks, sorted by strength (strongest first)
-        """
+        """Find local maxima in 1D signal that exceed threshold"""
         peaks = []
         
-        # Simple peak detection: point higher than neighbors
         for i in range(1, len(signal_1d) - 1):
             if (signal_1d[i] > threshold_db and 
                 signal_1d[i] > signal_1d[i-1] and 
                 signal_1d[i] > signal_1d[i+1]):
                 peaks.append(i)
         
-        # Sort by signal strength (descending)
         peaks.sort(key=lambda idx: signal_1d[idx], reverse=True)
-        
         return peaks
 
-
     def _measure_signal_width(self, signal_1d, peak_idx, db_drop=3.0):
-        """
-        Measure signal width at -3dB points
-        
-        Args:
-            signal_1d: 1D array of signal values in dB
-            peak_idx: Index of peak
-            db_drop: dB below peak to measure width (default: 3dB)
-            
-        Returns:
-            int: Width in bins
-        """
+        """Measure signal width at -3dB points"""
         peak_value = signal_1d[peak_idx]
         threshold = peak_value - db_drop
         
-        # Find left edge
         left_idx = peak_idx
         while left_idx > 0 and signal_1d[left_idx] > threshold:
             left_idx -= 1
         
-        # Find right edge
         right_idx = peak_idx
         while right_idx < len(signal_1d) - 1 and signal_1d[right_idx] > threshold:
             right_idx += 1
         
         return right_idx - left_idx
 
-
     def _compute_signal_centroid(self, signal_1d, frequencies_1d, threshold_db):
-        """
-        Compute center of mass of signal energy
-        
-        Args:
-            signal_1d: 1D array of signal values in dB
-            frequencies_1d: 1D array of frequencies
-            threshold_db: Only include energy above this threshold
-            
-        Returns:
-            float: Centroid frequency in Hz
-        """
-        # Convert dB to linear power for centroid calculation
+        """Compute center of mass of signal energy"""
         power_linear = 10 ** (signal_1d / 10.0)
         
-        # Only include bins above threshold
         mask = signal_1d > threshold_db
         if not np.any(mask):
             return None
         
-        # Compute weighted average
         numerator = np.sum(frequencies_1d[mask] * power_linear[mask])
         denominator = np.sum(power_linear[mask])
         
@@ -707,79 +663,49 @@ class LcarsWaterfall(LcarsWidget):
         
         return numerator / denominator
 
-
     def _find_signal_at_frequency(self, clicked_freq):
         """
         Find actual signal near clicked frequency using waterfall data
         
-        Strategy:
-        1. Define search window around click (±filter_width/2)
-        2. Average waterfall frames in that window (temporal smoothing)
-        3. Detect peaks above noise floor
-        4. Classify as narrow (peak) or wide (centroid) signal
-        5. Return snapped frequency and type
-        
-        Args:
-            clicked_freq: Raw clicked frequency in Hz
-            
         Returns:
             tuple: (snapped_freq_hz, snap_type)
-                snapped_freq_hz: Frequency to snap to
-                snap_type: 'peak', 'centroid', 'rounded', or None
         """
-        # Check if we have data
         if self.waterfall_data is None or self.frequencies is None:
             return clicked_freq, None
         
-        # Define search window (clamp to available data)
         window_width = self.filter_width / 2
         search_min = max(self.frequencies[0], clicked_freq - window_width)
         search_max = min(self.frequencies[-1], clicked_freq + window_width)
         
-        # Find frequency indices for search window
         freq_mask = (self.frequencies >= search_min) & (self.frequencies <= search_max)
         freq_indices = np.where(freq_mask)[0]
         
-        if len(freq_indices) < 3:  # Need at least a few bins
-            # Fallback: round to nearest 5 kHz
+        if len(freq_indices) < 3:
             rounded_freq = round(clicked_freq / SNAP_CONFIG['fallback_rounding_hz']) * SNAP_CONFIG['fallback_rounding_hz']
             return rounded_freq, 'rounded'
         
-        # Extract search window
         search_freqs = self.frequencies[freq_indices]
         
-           # Detect both continuous and transient signals
-        # Use all available frames, up to max
         num_frames = min(len(self.waterfall_data), SNAP_CONFIG['max_frames_to_average'])
         waterfall_window = self.waterfall_data[:num_frames, freq_indices]
         
-        # Strategy: Use MAX to preserve transients, then smooth to reduce noise
-        # MAX across time (axis=0) preserves brief strong signals
         max_psd = np.max(waterfall_window, axis=0)
         
-        # Apply light spatial smoothing (across frequency) to reduce noise spikes
-        # Moving average with window of 3 bins
         if len(max_psd) >= 3:
             smoothed_psd = np.convolve(max_psd, np.ones(3)/3, mode='same')
             averaged_psd = smoothed_psd
         else:
             averaged_psd = max_psd
         
-        # Compute noise floor from entire spectrum
         noise_floor = self._compute_noise_floor(self.waterfall_data[:num_frames])
-        
-        # Threshold for peak detection
         peak_threshold = noise_floor + SNAP_CONFIG['noise_threshold_db']
         
-        # Find peaks
         peaks = self._find_local_peaks(averaged_psd, peak_threshold)
         
         if not peaks:
-            # No signals found - fallback to rounding
             rounded_freq = round(clicked_freq / SNAP_CONFIG['fallback_rounding_hz']) * SNAP_CONFIG['fallback_rounding_hz']
             return rounded_freq, 'rounded'
         
-        # Filter out noise spikes (too narrow)
         valid_peaks = []
         for peak_idx in peaks:
             width = self._measure_signal_width(averaged_psd, peak_idx, db_drop=3.0)
@@ -787,21 +713,17 @@ class LcarsWaterfall(LcarsWidget):
                 valid_peaks.append((peak_idx, width))
         
         if not valid_peaks:
-            # All peaks were noise spikes - fallback
             rounded_freq = round(clicked_freq / SNAP_CONFIG['fallback_rounding_hz']) * SNAP_CONFIG['fallback_rounding_hz']
             return rounded_freq, 'rounded'
         
-        # Find peak closest to clicked frequency
         clicked_idx = np.argmin(np.abs(search_freqs - clicked_freq))
         closest_peak = min(valid_peaks, key=lambda p: abs(p[0] - clicked_idx))
         peak_idx, signal_width = closest_peak
         
-        # Determine if narrow or wide signal
         freq_bin_width = search_freqs[1] - search_freqs[0] if len(search_freqs) > 1 else 1000
         signal_width_hz = signal_width * freq_bin_width
         
         if signal_width_hz > SNAP_CONFIG['wide_signal_threshold_khz'] * 1000:
-            # Wide signal - use centroid
             centroid_freq = self._compute_signal_centroid(
                 averaged_psd, search_freqs, peak_threshold
             )
@@ -811,10 +733,9 @@ class LcarsWaterfall(LcarsWidget):
                     centroid_freq / 1e6, signal_width_hz / 1000))
                 return centroid_freq, 'centroid'
         
-        # Narrow signal - use peak
         peak_freq = search_freqs[peak_idx]
         print("Signal lock: PEAK at {:.3f} MHz (width: {:.1f} kHz, strength: {:.1f} dB)".format(
             peak_freq / 1e6, signal_width_hz / 1000, 
             averaged_psd[peak_idx] - noise_floor))
         
-        return peak_freq, 'peak'        
+        return peak_freq, 'peak'
