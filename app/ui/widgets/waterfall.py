@@ -121,10 +121,11 @@ class LcarsWaterfall(LcarsWidget):
         self.selection_snap_type = None  # 'peak', 'centroid', 'rounded', or None
 
         # Pre-load font for band label (avoid per-frame font construction)
+        # Slightly larger for better readability above PSD
         try:
-            self._font_band_label = pygame.font.Font("assets/swiss911.ttf", 15)
+            self._font_band_label = pygame.font.Font("assets/swiss911.ttf", 20)
         except Exception:
-            self._font_band_label = pygame.font.SysFont('monospace', 15)
+            self._font_band_label = pygame.font.SysFont('monospace', 20)
     
     def stop_scan(self):
         """Stop the waterfall scan"""
@@ -328,8 +329,27 @@ class LcarsWaterfall(LcarsWidget):
         """Set reference to demodulator for bandwidth visualization"""
         self.demodulator = demodulator
     
-    def _normalize_to_color_range(self, data, vmin=-90, vmax=40):
-        """Normalize dB values to 0-255 range for color mapping"""
+    def _normalize_to_color_range(self, data, vmin=None, vmax=None):
+        """
+        Normalize dB values to 0-255 range for color mapping.
+        
+        If vmin/vmax are not provided, auto-scale around the median noise floor:
+        - vmin = noise_floor - 5 dB (a little below the floor)
+        - vmax = noise_floor + 45 dB (about 50 dB window above floor)
+        """
+        if data is None:
+            return None
+        
+        if vmin is None or vmax is None:
+            # Flatten to 1D for robust statistics
+            noise_floor = float(self._compute_noise_floor(data))
+            vmin = noise_floor - 5.0
+            vmax = noise_floor + 45.0
+
+        # Prevent degenerate ranges
+        if vmax <= vmin:
+            vmin, vmax = -90.0, 40.0
+
         normalized = np.clip(data, vmin, vmax)
         normalized = ((normalized - vmin) / (vmax - vmin) * 255).astype(np.uint8)
         return normalized
@@ -486,21 +506,22 @@ class LcarsWaterfall(LcarsWidget):
         if self.frequencies is None:
             return
         
-        font = pygame.font.Font("assets/swiss911.ttf", 24)
+        # Larger font for easier reading along the x-axis
+        font = pygame.font.Font("assets/swiss911.ttf", 28)
         
         freq_min = self.frequencies[0] / 1e6
         freq_max = self.frequencies[-1] / 1e6
         freq_center = (freq_min + freq_max) / 2
         
         text = font.render("{:.2f} MHz".format(freq_min), True, (255, 153, 0))
-        surface.blit(text, (5, self.display_height - 30))
+        surface.blit(text, (5, self.display_height - 34))
         
         text = font.render("{:.2f} MHz".format(freq_center), True, (255, 153, 0))
-        text_rect = text.get_rect(center=(self.display_width // 2, self.display_height - 15))
+        text_rect = text.get_rect(center=(self.display_width // 2, self.display_height - 18))
         surface.blit(text, text_rect)
         
         text = font.render("{:.2f} MHz".format(freq_max), True, (255, 153, 0))
-        text_rect = text.get_rect(right=self.display_width - 5, top=self.display_height - 30)
+        text_rect = text.get_rect(right=self.display_width - 5, top=self.display_height - 34)
         surface.blit(text, text_rect)
     
     def _draw_frequency_selector(self, surface):
@@ -541,10 +562,11 @@ class LcarsWaterfall(LcarsWidget):
                 pygame.draw.rect(surface, color, 
                                (x_left, self.psd_height, box_width, box_height), 2)
         
-        pygame.draw.line(surface, color, 
-                        (self.selected_x, 0),
-                        (self.selected_x, self.display_height - 40), 
-                        3)
+        # Vertical selection line all the way from top band/PSD area to bottom labels
+        #pygame.draw.line(surface, color, 
+        #                (self.selected_x, 0),
+        #                (self.selected_x, self.display_height), 
+        #                3)
         
         crosshair_y = self.psd_height + 20
         pygame.draw.line(surface, color,

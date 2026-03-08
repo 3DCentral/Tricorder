@@ -18,6 +18,7 @@ class LcarsFrequencySelector(LcarsWidget):
 
     FREQ_ABS_MIN   = 50e6
     FREQ_ABS_MAX   = 2.2e9
+    H_PAD_PIXELS   = 20      # horizontal padding so end labels don't hug screen edges
     ZOOM_STEP_FACTOR = 2.0   # each step halves the log-span
     MAX_ZOOM         = 8     # 2^8 = 256x maximum zoom
 
@@ -125,12 +126,19 @@ class LcarsFrequencySelector(LcarsWidget):
         log_max  = np.log10(self.freq_max)
         log_freq = np.log10(max(frequency, 1))
         ratio    = (log_freq - log_min) / (log_max - log_min)
-        return int(max(0.0, min(1.0, ratio)) * self.display_width)
+        ratio    = max(0.0, min(1.0, ratio))
+
+        # Map to inner width so end labels don't run off the screen
+        inner_w = max(1, self.display_width - 2 * self.H_PAD_PIXELS)
+        return int(self.H_PAD_PIXELS + ratio * inner_w)
 
     def x_to_freq(self, x_pos):
-        ratio    = max(0.0, min(1.0, float(x_pos) / self.display_width))
-        log_min  = np.log10(self.freq_min)
-        log_max  = np.log10(self.freq_max)
+        inner_w = max(1.0, float(self.display_width - 2 * self.H_PAD_PIXELS))
+        ratio   = (float(x_pos) - self.H_PAD_PIXELS) / inner_w
+        ratio   = max(0.0, min(1.0, ratio))
+
+        log_min = np.log10(self.freq_min)
+        log_max = np.log10(self.freq_max)
         return 10 ** (log_min + ratio * (log_max - log_min))
 
     # ------------------------------------------------------------------
@@ -177,6 +185,7 @@ class LcarsFrequencySelector(LcarsWidget):
     # ------------------------------------------------------------------
 
     def _format_frequency(self, freq_hz):
+        """Full format with unit (for tooltips/logs)."""
         if freq_hz >= 1e9:
             return "{:.3f} GHz".format(freq_hz / 1e9)
         elif freq_hz >= 1e6:
@@ -185,6 +194,18 @@ class LcarsFrequencySelector(LcarsWidget):
             return "{:.1f} kHz".format(freq_hz / 1e3)
         else:
             return "{:.0f} Hz".format(freq_hz)
+
+    def _format_frequency_short(self, freq_hz):
+        """Numeric only, no unit — use when unit is shown once (scale/info bar)."""
+        if freq_hz >= 1e9:
+            return "{:.2f}".format(freq_hz / 1e9)
+        elif freq_hz >= 1e6:
+            m = freq_hz / 1e6
+            return "{:.1f}".format(m) if m < 1000 else "{:.0f}".format(m)
+        elif freq_hz >= 1e3:
+            return "{:.1f}".format(freq_hz / 1e3)
+        else:
+            return "{:.0f}".format(freq_hz)
 
     def _get_band_label(self, freq_hz):
         if freq_hz is None:
@@ -246,23 +267,64 @@ class LcarsFrequencySelector(LcarsWidget):
 
         candidates = sorted(set(base))
 
-        # Filter to window, keep spacing >= 45 px to avoid crowding
+        # Min spacing so short numeric labels don't overlap (no "MHz"/"GHz" per tick)
+        min_tick_px = 50
         major = []
         last_x = -999
         for freq in candidates:
             if freq < self.freq_min or freq > self.freq_max:
                 continue
             x = self.freq_to_x(freq)
-            if x - last_x >= 45:
+            # Always include ticks at the current window edges (e.g. 50 MHz, 2.2 GHz),
+            # even if they are closer than min_tick_px to the previous tick.
+            is_left_edge = abs(freq - self.freq_min) <= 1e3
+            is_right_edge = abs(freq - self.freq_max) <= 1e3
+            if is_left_edge or is_right_edge or x - last_x >= min_tick_px:
                 major.append(freq)
                 last_x = x
+
+        # Minor (unlabeled) ticks between majors — log-spaced to show log scale
+        minor_freqs = []
+        for i in range(len(major) - 1):
+            log_lo = np.log10(major[i])
+            log_hi = np.log10(major[i + 1])
+            for j in range(1, 4):  # 3 minor ticks between each major pair
+                log_m = log_lo + (log_hi - log_lo) * j / 4
+                minor_freqs.append(10 ** log_m)
+
+        minor_y_half = 10   # short tick: 10 px above/below baseline
+        major_y_half = 20   # major tick: 20 px above/below baseline
+        minor_color = (200, 200, 100)  # slightly dimmer yellow
+
+        # Draw minor ticks first (so majors draw on top)
+        for freq in minor_freqs:
+            if freq < self.freq_min or freq > self.freq_max:
+                continue
+            x = self.freq_to_x(freq)
+            pygame.draw.line(surface, minor_color,
+                             (x, y_base - minor_y_half), (x, y_base + minor_y_half), 1)
 
         for freq in major:
             x = self.freq_to_x(freq)
             pygame.draw.line(surface, (255, 255, 0),
-                             (x, y_base - 20), (x, y_base + 20), 2)
-            text = self._font_small.render(self._format_frequency(freq), True, (255, 255, 0))
+                             (x, y_base - major_y_half), (x, y_base + major_y_half), 2)
+            label = self._format_frequency_short(freq)
+            text = self._font_small.render(label, True, (255, 255, 0))
             surface.blit(text, text.get_rect(center=(x, y_base + 25)))
+
+        # Unit labels below the tick labels so they're not obscured (stay within widget height)
+        y_unit = y_base + 28
+        if self.freq_max >= 1e9 and self.freq_min < 1e9:
+            unit_l = self._font_band.render("MHz", True, (180, 180, 180))
+            unit_r = self._font_band.render("GHz", True, (180, 180, 180))
+            surface.blit(unit_l, (4, y_unit))
+            surface.blit(unit_r, (self.display_width - unit_r.get_width() - 4, y_unit))
+        elif self.freq_max >= 1e9:
+            unit_r = self._font_band.render("GHz", True, (180, 180, 180))
+            surface.blit(unit_r, (self.display_width - unit_r.get_width() - 4, y_unit))
+        else:
+            unit_l = self._font_band.render("MHz", True, (180, 180, 180))
+            surface.blit(unit_l, (4, y_unit))
 
     def _draw_selection_marker(self, surface):
         if self.selected_x is None:
@@ -274,8 +336,13 @@ class LcarsFrequencySelector(LcarsWidget):
             (self.selected_x + 8, y_base - 35),
         ])
         if self.selected_frequency:
-            text    = self._font_sel.render(
-                self._format_frequency(self.selected_frequency), True, (255, 255, 0))
+            # Short form; unit is clear from scale/info bar
+            sel_str = self._format_frequency_short(self.selected_frequency)
+            if self.selected_frequency >= 1e9:
+                sel_str += " G"
+            elif self.selected_frequency >= 1e6:
+                sel_str += " M"
+            text    = self._font_sel.render(sel_str, True, (255, 255, 0))
             trect   = text.get_rect(center=(self.selected_x, y_base - 50))
             padding = 5
             bg      = pygame.Surface((trect.width + padding*2, trect.height + padding*2))
@@ -313,16 +380,17 @@ class LcarsFrequencySelector(LcarsWidget):
             surface.blit(text, trect)
             return
 
-        # -- Line 1: sweep info + band label --
+        # -- Line 1: sweep info + band label (unit once per range) --
         band_label  = self._get_band_label(self.selected_frequency)
         band_suffix = "  |  {}".format(band_label) if band_label else ""
         sweep_range = self.get_sweep_range()
         if sweep_range:
-            s, e      = sweep_range
-            line1     = "Sweeps: {} | Range: {} - {}{}".format(
+            s, e = sweep_range
+            unit = "GHz" if s >= 1e9 else "MHz"
+            line1 = "Sweeps: {} | Range: {} - {} {}{}".format(
                 self.sweep_steps,
-                self._format_frequency(s), self._format_frequency(e),
-                band_suffix)
+                self._format_frequency_short(s), self._format_frequency_short(e),
+                unit, band_suffix)
         else:
             line1 = "Sweeps: {} | BW: {:.1f} MHz{}".format(
                 self.sweep_steps, self.get_sweep_bandwidth() / 1e6, band_suffix)
@@ -335,14 +403,17 @@ class LcarsFrequencySelector(LcarsWidget):
         surface.blit(bg1, (r1.x - padding, r1.y - padding))
         surface.blit(t1, r1)
 
-        # -- Line 2: zoom status --
+        # -- Line 2: zoom status (unit once) --
         if self.zoom_level > 0:
             zoom_factor = self.ZOOM_STEP_FACTOR ** self.zoom_level
-            line2 = "ZOOM {:.0f}x  |  {:.3f} - {:.3f} MHz  (v to zoom out)".format(
-                zoom_factor, self.freq_min / 1e6, self.freq_max / 1e6)
+            line2 = "ZOOM {:.0f}x  |  {} - {} MHz  (v to zoom out)".format(
+                zoom_factor,
+                self._format_frequency_short(self.freq_min),
+                self._format_frequency_short(self.freq_max))
             color2 = (255, 200, 50)   # amber when zoomed
         else:
-            line2  = "^ v zoom  |  < > adjust sweep count"
+            # At full view, show simple instructions rather than a zoom range
+            line2 = "^ v zoom  |  < > adjust sweep count"
             color2 = (200, 200, 200)  # dim when at full view
 
         t2  = self._font_inst.render(line2, True, color2)
