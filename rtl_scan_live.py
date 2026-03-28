@@ -7,6 +7,8 @@ BUG FIXES:
 2. Added DC spike removal using interpolation
 3. Increased FFT_SIZE for better resolution
 4. Added averaging for smoother display
+5. HISTORY PRESERVATION: Pre-populate waterfall buffer from previous run data
+   so the display doesn't "start over" when restarting (resume, demod toggle, etc.)
 
 Usage:
     python rtl_scan_live.py <center_freq> [sample_rate] [waterfall_lines]
@@ -157,7 +159,6 @@ def remove_dc_spike(psd, center_idx, window_size=50):
         
     except np.linalg.LinAlgError:
         # Fallback: if polynomial fit fails, use simple linear interpolation
-        # (This shouldn't happen but good to be safe)
         before_idx = np.arange(max(0, start_idx - 20), start_idx)
         after_idx = np.arange(end_idx, min(len(psd), end_idx + 20))
         
@@ -260,6 +261,70 @@ def setup_sdr(center_freq, sample_rate):
         raise
 
 
+def load_previous_waterfall(waterfall_lines, center_freq, sample_rate, fft_size):
+    """
+    Attempt to restore waterfall history from a previous run.
+
+    Compatibility checks:
+      - The saved frequencies array must exist and have the same length as
+        the current FFT_SIZE (same number of bins).
+      - The center frequency must match within 1 Hz (same tuning).
+      - The sample rate (bandwidth) must match within 1 Hz.
+
+    If any check fails we start fresh — the old data is for a different
+    frequency/bandwidth so it would look wrong on screen.
+
+    Returns:
+        deque pre-populated with historical rows (oldest first), or an empty
+        deque if no compatible history exists.
+    """
+    buf = deque(maxlen=waterfall_lines)
+
+    try:
+        # --- load saved arrays -------------------------------------------
+        saved_freqs = np.load(FREQUENCIES_FILE)
+        saved_waterfall = np.load(WATERFALL_FILE)
+
+        # --- compatibility: bin count must match --------------------------
+        if len(saved_freqs) != fft_size:
+            print("History skipped: bin count mismatch ({} vs {})".format(
+                len(saved_freqs), fft_size))
+            return buf
+
+        # --- compatibility: center frequency ------------------------------
+        saved_center = (saved_freqs[0] + saved_freqs[-1]) / 2.0
+        if abs(saved_center - center_freq) > 1.0:
+            print("History skipped: center freq mismatch ({:.3f} vs {:.3f} MHz)".format(
+                saved_center / 1e6, center_freq / 1e6))
+            return buf
+
+        # --- compatibility: bandwidth (sample rate) -----------------------
+        saved_bw = saved_freqs[-1] - saved_freqs[0]
+        if abs(saved_bw - sample_rate) > 1.0:
+            print("History skipped: bandwidth mismatch ({:.3f} vs {:.3f} MHz)".format(
+                saved_bw / 1e6, sample_rate / 1e6))
+            return buf
+
+        # --- load and pre-populate buffer --------------------------------
+        # saved_waterfall is stored newest-row-first (flipud was applied on
+        # save).  Reverse it so we push oldest→newest into the deque.
+        rows = saved_waterfall[::-1]   # oldest first
+
+        # Only keep up to waterfall_lines rows
+        rows = rows[-waterfall_lines:]
+
+        for row in rows:
+            buf.append(row)
+
+        print("Waterfall history restored: {} / {} lines".format(
+            len(buf), waterfall_lines))
+
+    except (IOError, OSError, ValueError) as e:
+        print("No previous waterfall history to restore ({})".format(e))
+
+    return buf
+
+
 def compute_psd_averaged(sdr, fft_size, num_averages):
     """
     Compute averaged Power Spectral Density from multiple FFTs
@@ -322,8 +387,10 @@ def main():
     metadata = np.array([center_freq, sample_rate, FFT_SIZE, waterfall_lines, UPDATE_INTERVAL])
     save_data_atomic(metadata, METADATA_FILE_TEMP, METADATA_FILE)
     
-    # Initialize waterfall buffer (FIFO queue)
-    waterfall_buffer = deque(maxlen=waterfall_lines)
+    # Initialize waterfall buffer — try to restore history from previous run
+    # so the display doesn't "start over" on resume/demod-toggle/ANALYZE pause.
+    waterfall_buffer = load_previous_waterfall(
+        waterfall_lines, center_freq, sample_rate, FFT_SIZE)
     
     print("\nStarting live scan...")
     print("  FFT size: {} (INCREASED for better resolution)".format(FFT_SIZE))
@@ -332,6 +399,7 @@ def main():
     print("  Waterfall history: {} lines (~{:.1f} seconds)".format(
         waterfall_lines, waterfall_lines*UPDATE_INTERVAL))
     print("  DC spike removal: SMOOTH POLYNOMIAL (eliminates discontinuities)")
+    print("  History carry-over: {} existing lines in buffer".format(len(waterfall_buffer)))
     print("\nWriting data to:")
     print("  PSD: {}".format(PSD_FILE))
     print("  Waterfall: {}".format(WATERFALL_FILE))
