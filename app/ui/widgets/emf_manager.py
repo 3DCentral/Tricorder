@@ -974,17 +974,16 @@ class LcarsEMFManager:
         if self.waterfall_display.visible:
             filter_width = self.waterfall_display.get_filter_width()
             
-            # Auto-select mode based on band's recommended demod
-            try:
-                from bands import get_band_for_freq_hz
-                band = get_band_for_freq_hz(frequency_hz)
-                band_mode = band.get('demod_mode', 'fm') if band else 'fm'
-            except Exception:
-                band_mode = 'fm'
-            mode_name_map = {'am': 'AM', 'fm': 'FM', 'wbfm': 'WBFM'}
-            suggested = mode_name_map.get(band_mode, 'Auto')
-            # Only auto-switch if currently on Auto
+            # Auto-select the best mode for this frequency when on 'Auto'
             if self.demod_modes[self.selected_demod_mode]['name'] == 'Auto':
+                try:
+                    from bands import get_band_for_freq_hz
+                    band = get_band_for_freq_hz(frequency_hz)
+                    band_mode = band.get('demod_mode', 'fm') if band else 'fm'
+                except Exception:
+                    band_mode = 'fm'
+                mode_map = {'am': 'AM', 'fm': 'FM', 'wbfm': 'WBFM'}
+                suggested = mode_map.get(band_mode, 'FM')
                 for i, m in enumerate(self.demod_modes):
                     if m['name'] == suggested:
                         self.selected_demod_mode = i

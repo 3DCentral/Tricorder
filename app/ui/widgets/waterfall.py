@@ -7,6 +7,15 @@ CHANGES FROM ORIGINAL:
 - Filter width is independent of SDR sample rate
 - Band name indicator: shows the current band name in the PSD area header
   (sourced from the central bands.py registry)
+
+HISTORY PRESERVATION FIX:
+- start_scan() no longer clears cached_waterfall_surface or data_hash.
+  The previously rendered waterfall stays on screen until the subprocess
+  delivers its first batch of real data, so there is no blank/stretching
+  transition when resuming or toggling demodulation.
+- set_data() only invalidates the render cache when the data actually
+  changes (hash check), which was already true — but we no longer
+  force-clear on start_scan either.
 """
 import pygame
 import numpy as np
@@ -128,7 +137,12 @@ class LcarsWaterfall(LcarsWidget):
             self._font_band_label = pygame.font.SysFont('monospace', 20)
     
     def stop_scan(self):
-        """Stop the waterfall scan"""
+        """Stop the waterfall scan.
+
+        The existing waterfall_data, psd_data, frequencies, and
+        cached_waterfall_surface are intentionally preserved so the display
+        stays frozen on the last received frame rather than going blank.
+        """
         if self.scan_active:
             self.process_manager.kill_process('waterfall_live')
             self.scan_process = None
@@ -137,7 +151,19 @@ class LcarsWaterfall(LcarsWidget):
 
     
     def start_scan(self, center_freq, sample_rate=None):
-        """Start live waterfall scan at given frequency
+        """Start live waterfall scan at given frequency.
+
+        History preservation: we deliberately do NOT clear
+        cached_waterfall_surface or data_hash here.  The subprocess started
+        below will pre-populate its deque from the existing /tmp files (same
+        frequency/bandwidth) and begin writing new data immediately.  Until
+        the first new set_data() call arrives the display keeps showing the
+        previous frame, so there is no blank/stretching gap.
+
+        If the frequency or bandwidth changes (different scan), the subprocess
+        will detect a compatibility mismatch, skip history loading, and start
+        fresh — but the old image still shows until real data arrives, which
+        is always better than a blank screen.
         
         Args:
             center_freq: Center frequency in Hz
@@ -149,7 +175,7 @@ class LcarsWaterfall(LcarsWidget):
         if sample_rate is None:
             sample_rate = self.current_bandwidth
         
-        # Stop any existing scan
+        # Stop any existing scan (does NOT clear display data)
         self.stop_scan()
         
         # Give SDR time to close
@@ -159,9 +185,9 @@ class LcarsWaterfall(LcarsWidget):
         self.center_frequency = center_freq
         self.current_bandwidth = sample_rate
         
-        # Invalidate cache when starting new scan
-        self.cached_waterfall_surface = None
-        self.data_hash = None
+        # NOTE: We intentionally do NOT reset cached_waterfall_surface or
+        # data_hash here.  The cached frame stays visible until new data
+        # from the subprocess overwrites it via set_data().
         
         # Start subprocess
         self.scan_process = self.process_manager.start_process(
@@ -268,8 +294,13 @@ class LcarsWaterfall(LcarsWidget):
     
     def set_data(self, waterfall_data, psd_data, frequencies):
         """
-        Update waterfall data
-        
+        Update waterfall data.
+
+        The render cache (cached_waterfall_surface) is only invalidated when
+        the data actually changes.  This means a paused waterfall holds its
+        last frame without re-rendering every tick, and a resumed waterfall
+        smoothly appends new rows instead of restarting from empty.
+
         Args:
             waterfall_data: 2D numpy array (lines, frequencies) - newest line at index 0
             psd_data: 1D numpy array of current PSD
@@ -561,12 +592,6 @@ class LcarsWaterfall(LcarsWidget):
                 
                 pygame.draw.rect(surface, color, 
                                (x_left, self.psd_height, box_width, box_height), 2)
-        
-        # Vertical selection line all the way from top band/PSD area to bottom labels
-        #pygame.draw.line(surface, color, 
-        #                (self.selected_x, 0),
-        #                (self.selected_x, self.display_height), 
-        #                3)
         
         crosshair_y = self.psd_height + 20
         pygame.draw.line(surface, color,
