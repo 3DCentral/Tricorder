@@ -2,6 +2,10 @@ import pygame
 import numpy as np
 from ui.widgets.sprite import LcarsWidget
 from bands import BANDS, get_band_for_freq_hz
+from bookmarks import bookmarks_in_range
+
+# Bookmark tick marks on the scale (distinct from band tint / yellow ticks)
+BOOKMARK_TICK_COLOR = (80, 160, 255)
 
 
 class LcarsFrequencySelector(LcarsWidget):
@@ -46,12 +50,14 @@ class LcarsFrequencySelector(LcarsWidget):
         try:
             self._font_small = pygame.font.Font("assets/swiss911.ttf", 20)
             self._font_band  = pygame.font.Font("assets/swiss911.ttf", 11)
+            self._font_band_highlight = pygame.font.Font("assets/swiss911.ttf", 22)
             self._font_sel   = pygame.font.Font("assets/swiss911.ttf", 18)
             self._font_info  = pygame.font.Font("assets/swiss911.ttf", 22)
             self._font_inst  = pygame.font.Font("assets/swiss911.ttf", 16)
         except Exception:
             self._font_small = pygame.font.SysFont('monospace', 20)
             self._font_band  = pygame.font.SysFont('monospace', 11)
+            self._font_band_highlight = pygame.font.SysFont('monospace', 22)
             self._font_sel   = pygame.font.SysFont('monospace', 18)
             self._font_info  = pygame.font.SysFont('monospace', 22)
             self._font_inst  = pygame.font.SysFont('monospace', 16)
@@ -221,6 +227,7 @@ class LcarsFrequencySelector(LcarsWidget):
         y_top        = 0
         y_base       = self.display_height - 40
         strip_height = y_base - y_top - 4
+        strip_y      = y_top + 2
 
         for band in BANDS:
             if band['end'] * 1e6 < self.freq_min or band['start'] * 1e6 > self.freq_max:
@@ -232,13 +239,30 @@ class LcarsFrequencySelector(LcarsWidget):
             fill = pygame.Surface((width, strip_height))
             fill.set_alpha(band['alpha'])
             fill.fill(band['color'])
-            surface.blit(fill, (x_start, y_top + 2))
+            surface.blit(fill, (x_start, strip_y))
 
-            if width >= 18:
-                lbl = self._font_band.render(band['name'], True, band['color'])
-                lx  = x_start + max(0, (width - lbl.get_width()) // 2)
-                if lx + lbl.get_width() <= self.display_width:
-                    surface.blit(lbl, (lx, y_top + 4))
+            lbl = self._font_band_highlight.render(band['name'], True, band['color'])
+            lw  = lbl.get_width()
+            if width >= lw + 8:
+                lx = x_start + max(0, (width - lw) // 2)
+                if lx + lw <= self.display_width:
+                    ly = strip_y + (strip_height - lbl.get_height()) // 2
+                    surface.blit(lbl, (lx, ly))
+
+    def _draw_bookmark_ticks(self, surface):
+        """Vertical blue ticks at bookmark frequencies visible in the current window."""
+        y_base = self.display_height - 40
+        y_top = 4
+        tick_half = 22
+        for b in bookmarks_in_range(self.freq_min, self.freq_max):
+            x = self.freq_to_x(b["freq_hz"])
+            pygame.draw.line(
+                surface,
+                BOOKMARK_TICK_COLOR,
+                (x, y_top),
+                (x, y_base + tick_half),
+                2,
+            )
 
     def _draw_scale(self, surface):
         y_base = self.display_height - 40
@@ -348,8 +372,8 @@ class LcarsFrequencySelector(LcarsWidget):
             bg      = pygame.Surface((trect.width + padding*2, trect.height + padding*2))
             bg.set_alpha(200)
             bg.fill((0, 0, 0))
-            surface.blit(bg, (trect.x - padding, trect.y - padding))
-            surface.blit(text, trect)
+            #surface.blit(bg, (trect.x - padding, trect.y - padding))
+            #surface.blit(text, trect)
 
     def _draw_scanning_highlight(self, surface):
         if self.scanning_range is None:
@@ -366,13 +390,13 @@ class LcarsFrequencySelector(LcarsWidget):
             surface.blit(hl, (x_start, y_base - 15))
 
     def _draw_info_bar(self, surface):
-        """Two-line info bar: sweep info on top, zoom status below."""
+        """Single-line info bar: sweep/range (or BW) and band."""
         padding = 5
 
         if self.selected_frequency is None:
             text  = self._font_inst.render(
                 "Tap to select a frequency", True, (255, 255, 0))
-            trect = text.get_rect(topleft=(10, 14))
+            trect = text.get_rect(topleft=(10, 0))
             bg    = pygame.Surface((trect.width + padding*2, trect.height + padding*2))
             bg.set_alpha(180)
             bg.fill((0, 0, 0))
@@ -396,33 +420,12 @@ class LcarsFrequencySelector(LcarsWidget):
                 self.sweep_steps, self.get_sweep_bandwidth() / 1e6, band_suffix)
 
         t1    = self._font_info.render(line1, True, (255, 255, 0))
-        r1    = t1.get_rect(topleft=(10, 10))
+        r1    = t1.get_rect(topleft=(10, 0))
         bg1   = pygame.Surface((r1.width + padding*2, r1.height + padding*2))
         bg1.set_alpha(180)
         bg1.fill((0, 0, 0))
         surface.blit(bg1, (r1.x - padding, r1.y - padding))
         surface.blit(t1, r1)
-
-        # -- Line 2: zoom status (unit once) --
-        if self.zoom_level > 0:
-            zoom_factor = self.ZOOM_STEP_FACTOR ** self.zoom_level
-            line2 = "ZOOM {:.0f}x  |  {} - {} MHz  (v to zoom out)".format(
-                zoom_factor,
-                self._format_frequency_short(self.freq_min),
-                self._format_frequency_short(self.freq_max))
-            color2 = (255, 200, 50)   # amber when zoomed
-        else:
-            # At full view, show simple instructions rather than a zoom range
-            line2 = "^ v zoom  |  < > adjust sweep count"
-            color2 = (200, 200, 200)  # dim when at full view
-
-        t2  = self._font_inst.render(line2, True, color2)
-        r2  = t2.get_rect(topleft=(10, 42))
-        bg2 = pygame.Surface((r2.width + padding*2, r2.height + padding*2))
-        bg2.set_alpha(180)
-        bg2.fill((0, 0, 0))
-        surface.blit(bg2, (r2.x - padding, r2.y - padding))
-        surface.blit(t2, r2)
 
     # ------------------------------------------------------------------
     # Main update / event
@@ -434,6 +437,7 @@ class LcarsFrequencySelector(LcarsWidget):
         self.image.fill((0, 0, 0))
         self._draw_band_highlights(self.image)
         self._draw_scale(self.image)
+        self._draw_bookmark_ticks(self.image)
         self._draw_scanning_highlight(self.image)
         self._draw_selection_marker(self.image)
         self._draw_info_bar(self.image)

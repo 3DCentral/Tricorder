@@ -6,6 +6,8 @@ import glob
 import json
 from time import sleep
 
+from bookmarks import bookmarks_in_range
+
 
 class LcarsEMFManager:
     """
@@ -215,6 +217,7 @@ class LcarsEMFManager:
                 print("Scan results restored")
             else:
                 self.spectrum_scan_display.visible = False
+            self._refresh_frequency_selector_sidebar()
             return True
 
         # Antenna analysis visible â†’ switch to frequency selector
@@ -236,30 +239,9 @@ class LcarsEMFManager:
             # Set up frequency selector based on selected band (if any)
             self._restore_scan_range()
             
-            # Update text display with band info or generic message
-            if (self.antenna_analysis.scan_complete and 
-                self.antenna_analysis.selected_band is not None):
-                selected_band = self.antenna_analysis.get_selected_band()
-                if selected_band:
-                    # Show info about the pre-configured band
-                    info_lines = [
-                        "FREQUENCY SELECTOR",
-                        "",
-                        "Pre-configured for: {}".format(selected_band['name']),
-                        "Range: {:.1f}-{:.1f} MHz".format(
-                            selected_band['start'],
-                            selected_band['end']
-                        ),
-                        "",
-                        "Tap SCAN to analyze this band",
-                        "or click to select different frequency",
-                        "",
-                        "Use UP/DOWN arrows to adjust sweep range"
-                    ]
-                    self._set_text(info_lines)
-                else:
-                    print("Select a target frequency on the scale above")
-            else:
+            self._refresh_frequency_selector_sidebar()
+            if not (self.antenna_analysis.scan_complete and
+                    self.antenna_analysis.selected_band is not None):
                 print("Select a target frequency on the scale above")
             return True
 
@@ -270,6 +252,7 @@ class LcarsEMFManager:
             self.spectrum_scan_display.visible = False
 
             self._restore_scan_range()
+            self._refresh_frequency_selector_sidebar()
             print("Select a target frequency on the scale above")
             return True
 
@@ -782,9 +765,27 @@ class LcarsEMFManager:
         Called by main.py when the user clicks a line in the TextDisplay.
         
         Behavior depends on context:
+        - Frequency selector (SCAN): Bookmark lines jump to saved frequency
         - Antenna analysis visible: Select a band
         - Waterfall visible: Select demodulation mode
         """
+        # SCAN: bookmark row click (lines 0-1 are header; bookmarks start at 2)
+        if (self.frequency_selector.visible and not self.waterfall_display.visible
+                and not self.antenna_analysis.visible):
+            vis = bookmarks_in_range(
+                self.frequency_selector.freq_min,
+                self.frequency_selector.freq_max,
+            )
+            if vis and 2 <= selected_index < 2 + len(vis):
+                b = vis[selected_index - 2]
+                hz = b["freq_hz"]
+                self.frequency_selector.set_selected_frequency(hz)
+                self.emf_button.target_frequency = hz / 1e6
+                self._update_scan_range_preview(hz)
+                self._update_demod_info(hz)
+                print("Bookmark: {} @ {:.3f} MHz".format(b["name"], hz / 1e6))
+                return
+
         # Antenna analysis: band selection
         if self.antenna_analysis.visible and self.antenna_analysis.scan_complete:
             band_names = self.antenna_analysis.get_known_band_names()
@@ -963,6 +964,71 @@ class LcarsEMFManager:
         if sweep_range:
             start_freq, end_freq = sweep_range
             self.frequency_selector.set_scanning_range(start_freq, end_freq)
+        if self.frequency_selector.visible and not self.waterfall_display.visible:
+            self._refresh_frequency_selector_sidebar()
+
+    def _frequency_selector_static_tail(self):
+        """Instructions below the bookmark block when not showing live demod details."""
+        if (getattr(self.antenna_analysis, "scan_complete", False) and
+                self.antenna_analysis.selected_band is not None):
+            selected_band = self.antenna_analysis.get_selected_band()
+            if selected_band:
+                return [
+                    "FREQUENCY SELECTOR",
+                    "",
+                    "Pre-configured for: {}".format(selected_band['name']),
+                    "Range: {:.1f}-{:.1f} MHz".format(
+                        selected_band['start'],
+                        selected_band['end'],
+                    ),
+                    "",
+                    "Tap SCAN to analyze this band",
+                    "or click to select different frequency",
+                    "",
+                    "Use UP/DOWN arrows to adjust sweep range",
+                ]
+        return [
+            "Select a target frequency",
+            "on the scale above.",
+            "",
+            "Tap SCAN to run spectrum sweep.",
+            "",
+            "UP/DOWN: zoom  |  < >: sweeps",
+        ]
+
+    def _build_scan_sidebar_lines(self, demod_info_lines=None):
+        """TextDisplay content for SCAN (frequency selector): bookmarks + tail or demod info."""
+        fm = self.frequency_selector.freq_min
+        fM = self.frequency_selector.freq_max
+        vis = bookmarks_in_range(fm, fM)
+        lines = ["BOOKMARKS (in view)", ""]
+        if vis:
+            for b in vis:
+                lines.append(
+                    "  {}  {}".format(
+                        b["name"],
+                        self.frequency_selector._format_frequency(b["freq_hz"]),
+                    )
+                )
+        else:
+            lines.append("  (none in this range)")
+        lines.extend(["", "---", ""])
+        if demod_info_lines is not None:
+            lines.extend(demod_info_lines)
+        else:
+            lines.extend(self._frequency_selector_static_tail())
+        return lines
+
+    def _refresh_frequency_selector_sidebar(self):
+        """Rebuild sidebar when zoom/sweep changes or entering SCAN."""
+        if not self.frequency_selector.visible or self.waterfall_display.visible:
+            return
+        freq = self._get_selected_frequency()
+        if freq:
+            demod = self.demodulator.get_demodulation_info(freq, None)
+            self._set_text(self._build_scan_sidebar_lines(demod_info_lines=demod))
+        else:
+            self._set_text(self._build_scan_sidebar_lines())
 
     def _update_demod_info(self, frequency_hz):
         """Update the side text display with demodulation protocol info.
@@ -1010,9 +1076,14 @@ class LcarsEMFManager:
             
             self._set_text(lines)
         else:
-            # Not in waterfall mode - show standard demod info
             filter_width = None
-            self._set_text(self.demodulator.get_demodulation_info(frequency_hz, filter_width))
+            demod_lines = self.demodulator.get_demodulation_info(
+                frequency_hz, filter_width)
+            if self.frequency_selector.visible and not self.waterfall_display.visible:
+                self._set_text(self._build_scan_sidebar_lines(
+                    demod_info_lines=demod_lines))
+            else:
+                self._set_text(demod_lines)
 
     # ---------------------------------------------------------------
     # Private: rendering
